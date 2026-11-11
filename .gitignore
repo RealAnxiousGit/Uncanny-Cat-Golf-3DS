@@ -1,0 +1,20 @@
+# Everything converted from the original game stays out of git.
+build/
+gen/
+romfs/
+pc/ucgsim
+*.elf
+*.3dsx
+*.smdh
+*.cia
+*.map
+*.bnr
+*.icn
+*.t3x
+dist/
+__pycache__/
+graphify-out/
+Banner*/banner.png
+Banner*/banner.wav
+# personal planning notes
+Uncanny Cat Golf 3DS Draft.md

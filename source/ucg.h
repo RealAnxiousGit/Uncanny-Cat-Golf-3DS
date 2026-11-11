@@ -1,0 +1,95 @@
+// Uncanny Cat Golf 3DS: shared types for the game code.
+// game.c, level.c and physics.c build for both the 3DS and the PC checker,
+// so nothing in them may touch 3DS libraries.
+#pragma once
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct { float x, y; } vec2;
+
+static inline vec2 v2(float x, float y) { vec2 r = {x, y}; return r; }
+static inline vec2 v2add(vec2 a, vec2 b) { return v2(a.x + b.x, a.y + b.y); }
+static inline vec2 v2sub(vec2 a, vec2 b) { return v2(a.x - b.x, a.y - b.y); }
+static inline vec2 v2mul(vec2 a, float s) { return v2(a.x * s, a.y * s); }
+static inline float v2dot(vec2 a, vec2 b) { return a.x * b.x + a.y * b.y; }
+static inline float v2len2(vec2 a) { return a.x * a.x + a.y * a.y; }
+static inline float v2len(vec2 a) { return sqrtf(v2len2(a)); }
+static inline vec2 v2norm(vec2 a) {
+    float l = v2len(a);
+    return l > 0 ? v2(a.x / l, a.y / l) : v2(0, 0);
+}
+static inline vec2 v2limit(vec2 a, float m) {
+    float l = v2len(a);
+    return (l > m && l > 0) ? v2mul(a, m / l) : a;
+}
+// Godot's Vector2.bounce(n): -reflect(n)
+static inline vec2 v2bounce(vec2 v, vec2 n) { return v2sub(v, v2mul(n, 2.0f * v2dot(v, n))); }
+static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
+
+// ---------------------------------------------------------------- level data
+enum { SHAPE_POLY, SHAPE_CIRCLE };
+typedef struct {
+    uint8_t kind;
+    uint32_t layers;
+    int n;          // polygon points
+    vec2 *pts;
+    vec2 c;         // circle centre
+    float r;
+    float x0, y0, x1, y1; // bounding box
+} Shape;
+
+enum {
+    OBJ_PLAYER, OBJ_GOAL, OBJ_GHOST, OBJ_COIN, OBJ_COUNT
+};
+
+#define MAX_PARAMS 8
+typedef struct {
+    int type;
+    vec2 pos;
+    float rot, sx, sy;
+    bool hidden;
+    int nparams;
+    char pkey[MAX_PARAMS][24];
+    float pval[MAX_PARAMS];
+} ObjDef;
+
+enum {
+    LF_ALWAYS_OB = 1, LF_NEVER_OB = 2, LF_MIRROR = 4, LF_HIDE_SCORING = 8, LF_UNSKIPPABLE = 16,
+};
+
+typedef struct {
+    char id[16];
+    char author[48];
+    int bounds;
+    int par;
+    float on_time;
+    int ranks[6];
+    int music;
+    float shade[4];
+    uint32_t flags;
+    int image_size;
+    bool has_over;
+    int nshapes;
+    Shape *shapes;
+    int nobjs;
+    ObjDef *objs;
+} LevelDef;
+
+bool level_load(LevelDef *lv, const char *path);
+void level_free(LevelDef *lv);
+float obj_param(const ObjDef *o, const char *key, float def);
+
+// ---------------------------------------------------------------- physics
+typedef struct {
+    bool hit;
+    vec2 normal;
+    int shape;
+    float travel_frac;
+} Collision;
+
+// Godot-style move_and_collide for a circle. Moves *pos, returns contact info.
+Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, uint32_t mask);
+// true if the point is inside any shape on the given layers
+bool phys_point_solid(const LevelDef *lv, vec2 p, uint32_t mask);
