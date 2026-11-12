@@ -120,6 +120,9 @@ class Node:
         return "<%s %s%s>" % (self.type, self.name, " @" + self.scene if self.scene else "")
 
 
+BINARY_SKIPPED = set()  # binary sub-scenes the text reader cannot open (left out of the level)
+
+
 def instantiate(project, res_path, _depth=0):
     if _depth > 12:
         raise RuntimeError("scene nesting too deep at " + res_path)
@@ -131,7 +134,11 @@ def instantiate(project, res_path, _depth=0):
         inst = a.get("instance")
         if inst is not None:
             sub_path = project.resolve_ext(res, inst.id)
-            node = instantiate(project, sub_path, _depth + 1)
+            try:
+                node = instantiate(project, sub_path, _depth + 1)
+            except UnicodeDecodeError:  # a binary scene (.scn / imported .glb): an empty stand-in
+                node = Node(name, "Node2D")
+                BINARY_SKIPPED.add(sub_path)
             node.name = name
             node.scene = sub_path
         elif "parent" in a and root is not None and root.find(a["parent"]) is not None \

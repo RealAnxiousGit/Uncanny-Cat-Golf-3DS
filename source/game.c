@@ -29,8 +29,10 @@ static void state_update(Game *g, const GameInput *in);
 static void body_shape(Game *g, int i) {
     Body *b = &g->bodies[i];
     Shape *s = &g->body_shapes[i];
-    s->layers = !b->alive ? 0u : (b->type == OBJ_SKULL || b->type == OBJ_CAR) ? 8u : 1u;
-    if (b->type == OBJ_SKULL) {
+    // dog_golf.tscn collision_layer 65; the winner's hitbox is disabled
+    s->layers = !b->alive || b->winner ? 0u : (b->type == OBJ_SKULL || b->type == OBJ_CAR) ? 8u
+              : b->type == OBJ_DOG ? 65u : 1u;
+    if (b->type == OBJ_SKULL || b->type == OBJ_DOG) {
         s->kind = SHAPE_CIRCLE;
         s->c = b->pos;
         s->r = b->radius;
@@ -87,6 +89,50 @@ static void block_hit(Game *g, int i) {
     b->popup = POPUP_TIME;
 }
 
+// level.gd switch(): switch_tiles[i].enabled = (i == switchState); dog_goal.gd: dog_tiles.enabled = false
+static void tiles_apply(Game *g) {
+    for (int t = 0; t < g->ntiles; t++)
+        if (g->tiles[t].role == 0) g->tiles[t].on = g->tiles[t].idx == g->switch_state;
+    for (int i = 0; i < g->lv.nshapes; i++) {
+        Shape *s = &g->lv.shapes[i];
+        if (!s->group) continue;
+        bool on = true;
+        for (int t = 0; t < g->ntiles; t++)
+            if (g->tiles[t].group == s->group) on = g->tiles[t].on;
+        s->layers = on ? s->base : 0u;
+    }
+}
+
+// switch_block.gd hit(), from the cat or a dog
+static void switch_hit(Game *g) {
+    if (g->nswitch > 0) {
+        g->switch_state = (g->switch_state + 1) % g->nswitch;
+        tiles_apply(g);
+        g->switch_pitch = randf(0.8f, 1.2f);
+    } else {
+        g->switch_pitch = randf(0.7f, 0.8f);
+    }
+    g->events |= EV_SWITCH;
+}
+
+// player.gd / dog_golf.gd: a dog that was bumped heads off along the bump, snapped to 45 degrees
+static void dog_push(vec2 from, Body *dog) {
+    const float step = 0.78539816f; // snappedf(angle, PI / 4)
+    float a = floorf(atan2f(dog->pos.y - from.y, dog->pos.x - from.x) / step + 0.5f) * step;
+    float l = v2len(dog->vel);
+    dog->vel = v2(cosf(a) * l, sinf(a) * l);
+}
+
+// chuckle.tscn: baddie.gd with chaser on (its velocity starts at zero)
+static void chuckle_setup(Body *b) {
+    b->chaser = b->chuckle = true;
+    b->chase_accel = 4;
+    b->chase_limit = 200;
+    b->vel = v2(0, 0);
+    b->pitch_lo = 0.7f;
+    b->pitch_hi = 1.3f;
+}
+
 // baddie_spawner.gd: on_death -> spawned_baddies.erase
 static void baddie_gone(Game *g, Body *b) {
     if (b->owner >= 0 && g->spawners[b->owner].count > 0) g->spawners[b->owner].count--;
@@ -103,6 +149,9 @@ static void baddie_death(Game *g, int i) {
     if (b->type == OBJ_CAR) {
         g->events |= EV_CAR;
         g->thought = TH_CAR;
+    } else if (b->chuckle) {
+        g->events |= EV_CHUCKLE;
+        g->thought = TH_CHUCKLE;
     } else {
         g->events |= EV_SKULL;
         g->thought = TH_SKULL;
@@ -110,6 +159,92 @@ static void baddie_death(Game *g, int i) {
     b->popup_score = b->score;
     g->level_bonus += b->score;
     b->popup = POPUP_TIME;
+}
+
+// dog_golf.gd _physics_process
+static void dog_tick(Game *g, int i) {
+    Body *b = &g->bodies[i];
+    if (b->winner) { // into the goal, shrinking
+        b->vel = v2(0, 0);
+        vec2 gp = g->doggoals[b->goal].pos;
+        b->pos = v2(lerpf(b->pos.x, gp.x, 0.05f), lerpf(b->pos.y, gp.y, 0.05f));
+        if (b->dscale > 0.001f) b->dscale -= 0.001f;
+        body_shape(g, i);
+        return;
+    }
+    phys_set_exclude(g->lv.nshapes + i);
+    Collision c = phys_move_circle(&g->lv, &b->pos, b->radius, v2mul(b->vel, TICK), 9u);
+    phys_set_exclude(-1);
+    if (c.hit) {
+        b->vel = v2bounce(b->vel, c.normal);
+        g->events |= EV_DOGBUMP;
+        int o = c.shape - g->lv.nshapes;
+        if (o >= 0) {
+            Body *ob = &g->bodies[o];
+            if (ob->type == OBJ_SKULL || ob->type == OBJ_CAR) baddie_death(g, o);
+            else if (ob->type == OBJ_DBLOCK) block_hit(g, o); // key doors only open for the cat
+            else if (ob->type == OBJ_SWITCH) switch_hit(g);
+            else if (ob->type == OBJ_DOG && ob->bounce) dog_push(b->pos, ob);
+        }
+    }
+    body_shape(g, i);
+}
+
+// dog_goal.gd _on_body_entered (collision_mask 64: dogs only)
+static void doggoals_tick(Game *g) {
+    for (int d = 0; d < g->ndoggoals; d++) {
+        if (g->doggoals[d].taken) continue;
+        for (int i = 0; i < g->nbodies; i++) {
+            Body *b = &g->bodies[i];
+            if (b->type != OBJ_DOG || b->winner) continue;
+            float rr = g->doggoals[d].r + b->radius;
+            if (v2len2(v2sub(b->pos, g->doggoals[d].pos)) >= rr * rr) continue;
+            b->goal = d;
+            b->winner = true;
+            body_shape(g, i);
+            g->doggoals[d].taken = true;
+            for (int t = 0; t < g->ntiles; t++)
+                if (g->tiles[t].group == g->doggoals[d].group) g->tiles[t].on = false;
+            tiles_apply(g);
+            g->events |= EV_DOGWIN;
+            g->thought = TH_DOG;
+            break;
+        }
+    }
+}
+
+// smiley_ring.gd clear()
+static void ring_clear(Game *g, int r, bool win) {
+    __typeof__(g->rings[0]) *R = &g->rings[r];
+    R->grabbed = 0;
+    R->running = false;
+    for (int c = 0; c < g->nscoins; c++)
+        if (g->scoins[c].ring == r) g->scoins[c].active = false;
+    R->won = win;
+    if (win) {
+        g->level_bonus += R->score;
+        R->after = RING_WIN_TIME;
+        g->events |= EV_RINGWIN;
+    } else {
+        R->after = RING_FAIL_TIME;
+        g->events |= EV_RINGFAIL;
+    }
+}
+
+// smiley_ring.gd _physics_process and its Timer
+static void rings_tick(Game *g) {
+    for (int r = 0; r < g->nrings; r++) {
+        __typeof__(g->rings[0]) *R = &g->rings[r];
+        if (R->gone) continue;
+        if (R->running) {
+            R->left -= TICK;
+            if (R->grabbed >= R->ncoins) ring_clear(g, r, true);
+            else if (R->left <= 0) ring_clear(g, r, false);
+        } else if (R->after > 0) {
+            R->after -= TICK; // $win / $lose finished: remove(), or reset() when redoable
+            if (R->after <= 0 && (R->won || !R->redoable)) R->gone = true;
+        }
+    }
 }
 
 // baddie.gd _physics_process: straight line, bouncing off walls and other baddies
@@ -122,6 +257,10 @@ static void bodies_tick(Game *g) {
             for (int h = 0; h < g->nheld; h++) yay |= same_color(g->keys[g->held[h]].color, b->color);
             b->lock_a = lerpf(b->lock_a, yay ? 0.0f : 1.0f, 0.1f);
         }
+        if (b->type == OBJ_DOG) {
+            dog_tick(g, i);
+            continue;
+        }
         if ((b->type != OBJ_SKULL && b->type != OBJ_CAR) || !b->alive) continue;
         float far = b->ignorey ? fmaxf(fabsf(b->pos.x), g->lv.bounds * 0.5f) : fmaxf(fabsf(b->pos.x), fabsf(b->pos.y));
         if (far > g->lv.bounds + BADDIE_DESPAWN) {
@@ -133,6 +272,11 @@ static void bodies_tick(Game *g) {
             b->pos = v2add(b->pos, v2mul(b->vel, TICK));
             body_shape(g, i);
             continue;
+        }
+        if (b->chaser) { // baddie.gd: chase the cat
+            b->vel = v2add(b->vel, v2mul(v2norm(v2sub(g->pos, b->pos)), b->chase_accel));
+            float l = v2len(b->vel);
+            if (l > b->chase_limit) b->vel = v2mul(b->vel, b->chase_limit / l);
         }
         phys_set_exclude(g->lv.nshapes + i);
         Collision c = phys_move_circle(&g->lv, &b->pos, b->radius, v2mul(b->vel, TICK), 9u);
@@ -173,6 +317,7 @@ static void spawners_tick(Game *g) {
         b->half = v2(8, 8);  // car.tscn RectangleShape2D 16x16
         b->radius = SKULL_RADIUS;
         b->ignorey = sp->ignorey;
+        if (sp->enemy == 2) chuckle_setup(b);
         body_shape(g, i);
         sp->count++;
         sp->countdown = sp->rate;
@@ -190,7 +335,8 @@ static void police_event(Game *g) {
     vec2 dir = v2(obj_param(o, "dir_x", 0), obj_param(o, "dir_y", 0));
     float speed = obj_param(o, "speed", 0);
     int car_spr = (int)obj_param(o, "spr2", -1);
-    bool skull = obj_param(o, "enemy", 0) != 0;
+    int enemy = (int)obj_param(o, "enemy", 0);
+    bool skull = enemy != 0;
     if (obj_param(o, "has_spawner", 0) != 0) {
         if (g->nspawners >= MAX_SPAWNERS) return;
         __typeof__(g->spawners[0]) *sp = &g->spawners[g->nspawners++];
@@ -206,6 +352,7 @@ static void police_event(Game *g) {
         sp->spr = (int)obj_param(o, "spr", -1);
         sp->car_spr = car_spr;
         sp->skull = skull;
+        sp->enemy = enemy;
         return;
     }
     int i = body_slot(g);
@@ -223,7 +370,50 @@ static void police_event(Game *g) {
     b->pitch_lo = b->pitch_hi = 1;
     b->half = v2(8, 8);
     b->radius = SKULL_RADIUS;
+    if (enemy == 2) chuckle_setup(b);
     body_shape(g, i);
+}
+
+// slot_machine.gd check_slots(), once every reel has stopped
+static bool happy_slot(int f) { return f == 0 || f == 1 || f == 2 || f == 5 || f == 6; }
+
+static void check_slots(Game *g) {
+    g->slots_stopped++;
+    if (g->nslots != 3 || g->slots_stopped != 3 || !g->has_slot_machine) return;
+    int a = g->slots[0].frame, b = g->slots[1].frame, c = g->slots[2].frame;
+    static const int RESULT[10] = {SLOT_JACKPOT, SLOT_HAPPY, SLOT_OK, SLOT_QUESTION, SLOT_PHONE,
+                                   SLOT_CHERRY, SLOT_EYE, SLOT_BLUE, SLOT_SAD, SLOT_SKULL};
+    static const int BONUS[10] = {10000, 4000, 2000, 0, 2000, 5000, 2000, 2000, 1500, 2000};
+    if (a == b && a == c) {
+        g->slot_result = RESULT[a];
+        g->level_bonus += a == 3 ? 1 + rand() % 10000 : BONUS[a]; // randi_range(1, 10000)
+        if (a == 6) g->slot_eyes = true;
+        if (a == 7) g->blue = 0.0001f; // blue_anim.play("Blue")
+        if (a == 9)                     // the hidden skull spawners wake up
+            for (int s = 0; s < g->nspawners; s++)
+                if (g->spawners[s].max == 0) g->spawners[s].max = g->skull_num, g->spawners[s].hidden = false;
+    } else if (a == 0 && a == b && c != a) {
+        g->slot_result = SLOT_CLOSE, g->level_bonus += 1000;
+    } else if (happy_slot(a) && happy_slot(b) && happy_slot(c)) {
+        g->slot_result = SLOT_GOOD, g->level_bonus += 3000;
+    } else if (a == b && c != a) {
+        g->slot_result = SLOT_BAD, g->level_bonus += 500;
+    } else {
+        g->slot_result = SLOT_LOSE, g->level_bonus += 1;
+    }
+    g->events |= EV_SLOTS;
+}
+
+// slot.gd _physics_process: the reel steps one symbol every rate+1 frames until stopped
+static void slots_tick(Game *g) {
+    for (int i = 0; i < g->nslots; i++) {
+        if (!g->slots[i].spinning) continue;
+        if (++g->slots[i].cur > g->slots[i].rate) {
+            g->slots[i].frame = (g->slots[i].frame + 1) % 10;
+            g->slots[i].cur = 0;
+        }
+    }
+    if (g->blue > 0 && g->blue < 1) g->blue = fminf(1, g->blue + TICK);
 }
 
 // key.gd: held keys circle the cat
@@ -285,6 +475,8 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
         case OBJ_KEYDOOR:
         case OBJ_SKULL:
         case OBJ_CAR:
+        case OBJ_SWITCH:
+        case OBJ_DOG:
             if (g->nbodies < MAX_BODIES) {
                 Body *b = &g->bodies[g->nbodies++];
                 b->type = o->type;
@@ -305,9 +497,21 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
                 b->rot = o->rot;
                 b->radius = SKULL_RADIUS * o->sx;
                 if (o->type == OBJ_CAR) b->half = v2(8 * o->sx, 8 * o->sy), b->rot = 0; // only the picture turns
-                if (o->type == OBJ_SKULL || o->type == OBJ_CAR) // baddie.gd: velocity = speed * direction.normalized()
+                if (o->type == OBJ_SKULL || o->type == OBJ_CAR || o->type == OBJ_DOG) // velocity = speed * direction.normalized()
                     b->vel = v2mul(v2norm(v2(obj_param(o, "dir_x", 0), obj_param(o, "dir_y", 0))),
                                    obj_param(o, "speed", 0));
+                if (o->type == OBJ_SKULL && obj_param(o, "chaser", 0) != 0) {
+                    b->chaser = true; // baddie.gd: a chaser's velocity isn't set in _ready()
+                    b->chase_accel = obj_param(o, "chase_accel", 4);
+                    b->chase_limit = obj_param(o, "chase_limit", 200);
+                    b->vel = v2(0, 0);
+                }
+                b->chuckle = obj_param(o, "chuckle", 0) != 0;
+                if (o->type == OBJ_DOG) {
+                    b->radius = obj_param(o, "radius", 15.8f) * o->sx;
+                    b->bounce = obj_param(o, "bounce", 1) != 0;
+                    b->dscale = 0.064f;
+                }
             }
             break;
         case OBJ_KEY:
@@ -326,6 +530,67 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
             break;
         case OBJ_POLICE:
             g->police = o;
+            break;
+        case OBJ_TILES:
+            if (g->ntiles < MAX_TILES) {
+                __typeof__(g->tiles[0]) *t = &g->tiles[g->ntiles++];
+                t->group = (int)obj_param(o, "group", 0);
+                t->role = (int)obj_param(o, "role", 0);
+                t->idx = (int)obj_param(o, "idx", 0);
+                t->spr = (int)obj_param(o, "spr", -1);
+                t->on = obj_param(o, "on", 1) != 0;
+                t->over = obj_param(o, "over", 0) != 0;
+                if (t->role == 0) g->nswitch++;
+            }
+            break;
+        case OBJ_DOGGOAL:
+            if (g->ndoggoals < MAX_DOGGOALS) {
+                __typeof__(g->doggoals[0]) *d = &g->doggoals[g->ndoggoals++];
+                d->pos = o->pos;
+                d->r = obj_param(o, "radius", 16) * o->sx;
+                d->group = (int)obj_param(o, "group", 0);
+                d->spr = (int)obj_param(o, "spr", -1);
+            }
+            break;
+        case OBJ_RING:
+            if (g->nrings < MAX_RINGS) {
+                __typeof__(g->rings[0]) *r = &g->rings[g->nrings++];
+                r->pos = o->pos;
+                r->r = obj_param(o, "radius", 24) * o->sx;
+                r->time_given = obj_param(o, "time_given", 0);
+                r->score = (int)obj_param(o, "score_value", 0);
+                r->spr = (int)obj_param(o, "spr", -1);
+                r->bell = obj_param(o, "ring_bell", 1) != 0;
+                r->redoable = obj_param(o, "redoable", 0) != 0;
+                r->color[0] = obj_param(o, "color_r", 1);
+                r->color[1] = obj_param(o, "color_g", 1);
+                r->color[2] = obj_param(o, "color_b", 1);
+            }
+            break;
+        case OBJ_SCOIN:
+            if (g->nscoins < MAX_SCOINS) {
+                __typeof__(g->scoins[0]) *c = &g->scoins[g->nscoins++];
+                c->pos = o->pos;
+                c->r = obj_param(o, "radius", 10) * o->sx;
+                c->ring = (int)obj_param(o, "ring", -1);
+                c->spr = (int)obj_param(o, "spr", -1);
+            }
+            break;
+        case OBJ_SLOT:
+            if (g->nslots < MAX_SLOTS) {
+                __typeof__(g->slots[0]) *s = &g->slots[g->nslots++];
+                s->pos = o->pos;
+                s->rate = (int)obj_param(o, "rate", 10);
+                s->coin = (int)obj_param(o, "coin", -1);
+                s->spr = (int)obj_param(o, "spr", -1);
+                s->nframes = (int)obj_param(o, "frames", 0);
+                s->spinning = true;
+            }
+            break;
+        case OBJ_SLOTMACHINE:
+            g->has_slot_machine = true;
+            g->slot_machine_pos = o->pos;
+            g->skull_num = (int)obj_param(o, "skull_num", 30);
             break;
         case OBJ_JUMPPAD:
             if (g->npads < MAX_PADS) {
@@ -351,7 +616,9 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
                 sp->spr = (int)obj_param(o, "spr", -1);
                 sp->car_spr = (int)obj_param(o, "spr2", -1);
                 sp->skull = obj_param(o, "enemy", 0) != 0;
+                sp->enemy = (int)obj_param(o, "enemy", 0);
                 sp->ignorey = obj_param(o, "ignorey", 0) != 0;
+                sp->hidden = o->hidden;
             }
             break;
         case OBJ_TOKEN:
@@ -370,6 +637,9 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
             break;
         }
     }
+    for (int c = 0; c < g->nscoins; c++)
+        if (g->scoins[c].ring >= 0 && g->scoins[c].ring < g->nrings) g->rings[g->scoins[c].ring].ncoins++;
+    tiles_apply(g); // level.gd _ready(): switch(); also undoes the last try's switches
     for (int i = 0; i < g->nbodies; i++) body_shape(g, i);
     phys_set_dynamic(g->body_shapes, g->nbodies);
     g->sand_claimer = -1;
@@ -656,6 +926,11 @@ static void player_tick(Game *g, const GameInput *in) {
                 hit_moving_wall = true;
                 baddie_death(g, body);
                 g->events |= EV_BUMP;
+            } else if (body >= 0 && g->bodies[body].type == OBJ_SWITCH) {
+                switch_hit(g);
+                g->events |= EV_BUMP;
+            } else if (body >= 0 && g->bodies[body].type == OBJ_DOG) {
+                g->events |= EV_BUMP;
             } else if (body >= 0) {
                 block_hit(g, body);
                 g->events |= EV_BUMP;
@@ -673,6 +948,7 @@ static void player_tick(Game *g, const GameInput *in) {
         if (hit_moving_wall) g->pos = v2add(g->pos, v2mul(g->vel, TICK));
         float av2 = v2len2(g->add_vel), vv2 = v2len2(g->vel);
         if (100 * av2 > vv2 && vv2 > 0) g->vel = v2mul(g->vel, sqrtf(100 * av2 / vv2));
+        if (body >= 0 && g->bodies[body].type == OBJ_DOG && g->bodies[body].bounce) dog_push(g->pos, &g->bodies[body]);
     }
 }
 
@@ -714,6 +990,11 @@ static void areas_tick(Game *g) {
             bool token = g->coins[i].spr >= 0;
             g->events |= token ? EV_BOOST : EV_COIN;
             if (g->coins[i].does_speed) g->vel = v2mul(v2norm(g->vel), g->coins[i].set_speed);
+            for (int s = 0; s < g->nslots; s++) // slot.gd stop(): collect_connect.body_entered
+                if (g->slots[s].coin == i && g->slots[s].spinning) {
+                    g->slots[s].spinning = false;
+                    check_slots(g);
+                }
             if (g->coins[i].mult) {
                 g->level_bonus += g->coins[i].score + g->coins[i].multval * g->coin_multiplier;
                 if (g->coin_multiplier <= 9) g->coin_multiplier++;
@@ -723,6 +1004,32 @@ static void areas_tick(Game *g) {
                 if (!token) g->thought = TH_MONEY; // tokens have no do_thought
             }
         }
+    }
+    // smiley_ring.gd collect(): the ring's coins come out and its timer starts
+    for (int r = 0; r < g->nrings; r++) {
+        __typeof__(g->rings[0]) *R = &g->rings[r];
+        if (R->gone || R->running || R->after > 0) continue;
+        float rr = R->r + PLAYER_RADIUS;
+        if (v2len2(v2sub(R->pos, g->pos)) >= rr * rr) continue;
+        R->running = true;
+        R->left = R->time_given;
+        for (int c = 0; c < g->nscoins; c++)
+            if (g->scoins[c].ring == r) g->scoins[c].active = true;
+        if (R->bell) g->events |= EV_RING;
+    }
+    // smiley_coin.gd collect()
+    for (int c = 0; c < g->nscoins; c++) {
+        __typeof__(g->scoins[0]) *S = &g->scoins[c];
+        if (!S->active || S->ring < 0) continue;
+        float rr = S->r + PLAYER_RADIUS;
+        if (v2len2(v2sub(S->pos, g->pos)) >= rr * rr) continue;
+        __typeof__(g->rings[0]) *R = &g->rings[S->ring];
+        g->scoin_pitch = 1.0f + R->grabbed * 0.05f;
+        g->events |= EV_SCOIN;
+        R->grabbed++;
+        S->count = R->grabbed;
+        S->popup = POPUP_TIME;
+        S->active = false;
     }
     // jump_pad.gd _on_body_entered
     for (int p = 0; p < g->npads; p++) {
@@ -832,13 +1139,18 @@ void game_tick(Game *g, const GameInput *in) {
 
     phys_set_dynamic(g->body_shapes, g->nbodies);
     spawners_tick(g);
+    slots_tick(g);
     player_tick(g, in);
     keys_tick(g);
     bodies_tick(g);
+    doggoals_tick(g);
     ghosts_tick(g);
+    rings_tick(g);
     areas_tick(g);
     for (int i = 0; i < g->ncoins; i++)
         if (g->coins[i].popup > 0) g->coins[i].popup -= TICK;
+    for (int i = 0; i < g->nscoins; i++)
+        if (g->scoins[i].popup > 0) g->scoins[i].popup -= TICK;
     if (g->active) g->time += TICK;
     g->frame++;
 }

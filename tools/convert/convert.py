@@ -122,6 +122,11 @@ def convert_levels(project, tc, out, worlds, report):
                     tex3ds([png], os.path.join(out_dir, name + suffix + ".t3x"), fmt, z="lz11")
                     if not KEEP_PNG:
                         os.remove(png)
+            for gid, fp in info.get("tiles", []):  # switchable tile layers, one file each
+                pot_pad(fp)
+                tex3ds([fp], os.path.join(out_dir, "%s_t%d.t3x" % (name, gid)), "rgba8", z="lz11")
+                if not KEEP_PNG:
+                    os.remove(fp)
             if info["dyn"]:
                 tex3ds(info["dyn"], os.path.join(out_dir, name + "_d.t3x"), "rgba8", atlas=True, z="lz11")
                 if not KEEP_PNG:

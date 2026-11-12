@@ -30,20 +30,31 @@ DYNAMIC = {
     "jump_pad.tscn": "jumppad",
     "baddie_spawner.tscn": "spawner",
     "car.tscn": "car",
+    # World 3
+    "chuckle.tscn": "skull",  # baddie.gd too, as a chaser
+    "switch_block.tscn": "switch",
+    "dog_golf.tscn": "dog",
+    "dog_goal.tscn": "doggoal",
+    "smiley_ring.tscn": "ring",
+    "smiley_coin.tscn": "scoin",
 }
 CAR_SCENE = "res://assetsNEW/scenes/objects/baddies/car.tscn"
 SPAWNER_SCENE = "res://assetsNEW/scenes/objects/baddies/baddie_spawner.tscn"
 SKULL_SCENE = "res://assetsNEW/scenes/objects/baddies/skull.tscn"
+CHUCKLE_SCENE = "res://assetsNEW/scenes/objects/baddies/chuckle.tscn"
 # Areas whose art stays baked into the floor; only their outline goes to the game code.
 ZONES = {"sand_pit.tscn": "sand", "water_death.tscn": "water"}
 # Objects drawn at runtime from their own baked picture (<id>_d.t3x)
-PICTURED = {"dblock", "keydoor", "key", "skull", "token", "jumppad", "spawner", "car"}
+PICTURED = {"dblock", "keydoor", "key", "skull", "token", "jumppad", "spawner", "car",
+            "switch", "dog", "doggoal", "ring", "scoin"}
 # the node that gets graphic.modulate = level.level_shade in each object's _ready()
 SHADED = {"skull": "AnimatedSprite2D", "car": "Sprite2D", "token": "AnimatedSprite2D", "spawner": "Door",
-          "jumppad": "Sprite2D"}
+          "jumppad": "Sprite2D", "dog": "Sprite2D", "doggoal": "AnimatedSprite2D", "ring": "AnimatedSprite2D"}
 DYN_PX = 1.0  # pixels per world unit in the object pictures
 DYN_SKIP = {"ScorePopup", "ColorblindLabel", "editor_sprite", "lock"}
-SKIP_SCENES = {"level_hud.tscn"}
+# Secret keys (secret_key_trigger.gd / secret_key_hint.gd) free themselves until the key quest reaches step 2
+# (Master.save_data.QUEST_PROGRESS); the quest is not ported yet, so they are left out like in a fresh save.
+SKIP_SCENES = {"level_hud.tscn", "secret_key_trigger.tscn", "secret_key_hint.tscn"}
 SKIP_TYPES = {"Camera2D", "AudioStreamPlayer", "AudioStreamPlayer2D", "AnimationPlayer", "Timer",
               "CollisionShape2D", "CollisionPolygon2D", "Marker2D", "GPUParticles2D", "CPUParticles2D",
               "Label", "RichTextLabel", "Line2D", "TextureButton", "Button", "SubViewport",
@@ -74,6 +85,12 @@ def _obj_params(node):
     return out
 
 
+def _enemy_kind(ets):
+    """What a spawner's enemy_to_spawn scene is: 0 car, 1 skull, 2 chuckle (baddie_spawner.gd editorEnemies)."""
+    s = str(getattr(ets, "path", ets)) if ets is not None else ""
+    return 2 if "chuckle" in s else (1 if "skull" in s else 0)
+
+
 def _kind_params(kind, n):
     out = []
     if kind in ("dblock", "keydoor"):
@@ -101,9 +118,7 @@ def _kind_params(kind, n):
                 "radius=%s" % _fmt(_circle_radius(n, 16.0))]
     if kind == "spawner":  # baddie_spawner.gd
         d = S.vec(n.get("b_direction"))
-        ets = n.get("enemy_to_spawn")
-        enemy = "skull" if ets is not None and "skull" in str(getattr(ets, "path", ets)) else "car"
-        out += ["enemy=%d" % (1 if enemy == "skull" else 0),
+        out += ["enemy=%d" % _enemy_kind(n.get("enemy_to_spawn")),
                 "spawn_rate=%d" % int(n.get("spawn_rate", 0) or 0),
                 "spawn_countdown=%d" % int(n.get("spawn_countdown", 0) or 0),
                 "max_baddies=%d" % int(n.get("max_baddies", 0) or 0),
@@ -122,6 +137,31 @@ def _kind_params(kind, n):
                 "score_value=%s" % _fmt(int(n.get("score_value", 0) or 0))]
         pr = S.vec(n.get("death_sound_pitch"), (1.0, 1.0))
         out += ["pitch_lo=%s" % _fmt(pr[0]), "pitch_hi=%s" % _fmt(pr[1])]
+        if n.get("chaser"):  # chuckle.tscn: chases the cat
+            out += ["chaser=1", "chase_accel=%s" % _fmt(float(n.get("chase_accel", 4.0) or 0)),
+                    "chase_limit=%s" % _fmt(float(n.get("chase_limit", 200.0) or 0))]
+        if n.get("do_thought") == "Chuckle":
+            out.append("chuckle=1")
+    if kind == "switch":  # switch_block.gd (block.gd size)
+        w, h = S.vec(n.get("size"), (32.0, 32.0))
+        out += ["size_x=%s" % _fmt(w), "size_y=%s" % _fmt(h), "keep_face=%d" % (1 if n.get("keep_face") else 0)]
+    if kind == "dog":  # dog_golf.gd
+        d = S.vec(n.get("direction"))
+        out += ["speed=%s" % _fmt(float(n.get("speed", 0) or 0)), "dir_x=%s" % _fmt(d[0]), "dir_y=%s" % _fmt(d[1]),
+                "bounce=%d" % (0 if n.get("bounce_off_player") is False else 1),
+                "radius=%s" % _fmt(_circle_radius(n, 15.8))]
+    if kind == "doggoal":
+        out.append("radius=%s" % _fmt(_circle_radius(n, 16.0)))
+    if kind == "ring":  # smiley_ring.gd
+        col = S.color(n.get("color"))
+        out += ["time_given=%s" % _fmt(float(n.get("time_given", 0) or 0)),
+                "score_value=%s" % _fmt(int(n.get("score_value", 0) or 0)),
+                "ring_bell=%d" % (0 if n.get("ring_bell") is False else 1),
+                "redoable=%d" % (1 if n.get("redoable") else 0),
+                "radius=%s" % _fmt(_circle_radius(n, 24.0)),
+                "color_r=%s" % _fmt(col[0]), "color_g=%s" % _fmt(col[1]), "color_b=%s" % _fmt(col[2])]
+    if kind == "scoin":
+        out.append("radius=%s" % _fmt(_circle_radius(n, 10.0)))
     return out
 
 
@@ -143,6 +183,10 @@ def _prepare_object(kind, root, rotate_deg=None):
             arrow.props["rotation"] = float(root.get("direction", 0) or 0) + 0.5 * math.pi
             if float(root.get("speed_granted", 0) or 0) > 20.0:  # Player.STOP_SPEED
                 arrow.props["frame"] = 1
+    if kind == "switch" and not root.get("keep_face"):  # switch_block.gd change_face(): frame = switchState (0)
+        spr = root.child("Sprite2D")
+        if spr is not None:
+            spr.props["frame"] = 0
     if kind in ("car", "skull"):  # baddie.gd: graphic.rotation_degrees = rotate
         deg = rotate_deg if rotate_deg is not None else float(root.get("rotate", 0) or 0)
         g = root.child("Sprite2D") or root.child("AnimatedSprite2D")
@@ -150,9 +194,45 @@ def _prepare_object(kind, root, rotate_deg=None):
             g.props["rotation"] = math.radians(deg)
 
 
+def _resolve(n, path):
+    """A NodePath relative to node n ("../../Collectibles/StopToken")."""
+    x = n
+    for part in str(path).split("/"):
+        if not part or part == ".":
+            continue
+        x = x.parent if part == ".." else (x.child(part) if x is not None else None)
+        if x is None:
+            return None
+    return x
+
+
+def render_slot_frames(project, tc, root):
+    """slot.tscn: the reel picture (slots.png, 10 frames) with its screen overlay, one picture per frame."""
+    pics = []
+    gx = S.global_xform(root)
+    to_local = S.invert((1.0, 0.0, gx[2], 0.0, 1.0, gx[5]))
+    for fr in range(int(root.get("hframes", 10) or 10)):
+        root.props["frame"] = fr
+        cv = B.Canvas(256, -128, -128, DYN_PX)
+        B.draw_sprite(cv, tc, root, S.mul(to_local, gx), root.get("texture"), S.global_modulate(root))
+        for c in root.walk():
+            if c is not root and c.type == "Polygon2D" and S.visible(c):
+                B.draw_polygon(cv, tc, c, S.mul(to_local, S.global_xform(c)), S.global_modulate(c))
+        img = cv.image()
+        a = np.asarray(img)[..., 3]
+        ys, xs = np.nonzero(a)
+        if len(xs) == 0:
+            return []
+        x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+        pics.append((img.crop((x0, y0, x1, y1)), (128 - x0, 128 - y0)))
+    root.props["frame"] = 0
+    return pics
+
+
 def render_spawned(project, tc, kind, rotate_deg, level_shade):
     """Picture of the car or skull a spawner makes (its scene, turned by b_rotate)."""
-    root = S.instantiate(project, SKULL_SCENE if kind == "skull" else CAR_SCENE)
+    root = S.instantiate(project, {"skull": SKULL_SCENE, "chuckle": CHUCKLE_SCENE}.get(kind, CAR_SCENE))
+    kind = "skull" if kind == "chuckle" else kind
     _prepare_object(kind, root, rotate_deg)
     return _render_object(project, tc, root, kind, level_shade)
 
@@ -283,6 +363,9 @@ def shape_polys(node, xf, layer_bits, out):
 
 def convert_level(project, tc, res_path, out_dir, out_name, report):
     root = S.instantiate(project, res_path)
+    for b in sorted(S.BINARY_SKIPPED):
+        report.append("note: binary scene left out: " + b)
+    S.BINARY_SKIPPED.clear()
     p = root.props
     bounds = int(p.get("bounds", 256))
     lid = p.get("ID", out_name)
@@ -294,9 +377,62 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
     dynamic_roots = set()
     player_index = None
     win_conf = p.get("win_confetti")
+    # tile layers the game turns on and off: level.gd switch_tiles (switch blocks) and dog_goal.gd dog_tiles
+    tile_groups = {}  # id(layer) -> (group, role 0 switch / 1 dog, switch index, layer)
+    goal_tiles = {}   # id(dog goal) -> id(its layer)
+    for i, path in enumerate(p.get("switch_tiles") or []):
+        t = root.find(str(path))
+        if t is not None and id(t) not in tile_groups:
+            tile_groups[id(t)] = (len(tile_groups) + 1, 0, i, t)
+    rings = []
+    for n in root.walk():
+        base = os.path.basename(n.scene) if n.scene else ""
+        if base == "dog_goal.tscn":
+            t = _resolve(n, n.get("dog_tiles")) if n.get("dog_tiles") else root.child("dogtiles")
+            if t is not None:
+                if id(t) not in tile_groups:
+                    tile_groups[id(t)] = (len(tile_groups) + 1, 1, 0, t)
+                goal_tiles[id(n)] = id(t)
+        if base == "smiley_ring.tscn":
+            rings.append(n)
+    # smiley_ring.gd _get_coins(): the SmileyCoins under c_parent, or same-coloured siblings
+    coin_ring = {}
+    for ri, r in enumerate(rings):
+        cp = _resolve(r, r.get("c_parent")) if r.get("c_parent") else None
+        if cp is not None:
+            members = [c for c in cp.children if c.scene and os.path.basename(c.scene) == "smiley_coin.tscn"]
+        else:
+            col = S.color(r.get("color"))
+            members = [c for c in (r.parent.children if r.parent else [])
+                       if c.scene and os.path.basename(c.scene) == "smiley_coin.tscn"
+                       and all(abs(a - b) < 1e-3 for a, b in zip(S.color(c.get("modulate")), col))]
+        for c in members:
+            coin_ring.setdefault(id(c), ri)
+    node_of = []  # the scene node behind each object, to link slots to their tokens
+    slot_links = []  # (object index, token node)
     for n in root.walk():
         if n.scene:
             base = os.path.basename(n.scene)
+            if base == "slot.tscn":  # slot.gd: spins until its collect_connect token is taken
+                dynamic_roots.add(id(n))
+                frames = render_slot_frames(project, tc, n)
+                first = -1
+                for pic in frames:  # kept in a row, so frame f is spr + f
+                    dyn.append(pic)
+                    if first < 0:
+                        first = len(dyn) - 1
+                pos = S.apply(S.global_xform(n), (0, 0))
+                slot_links.append((len(objects), _resolve(n, n.get("collect_connect", ""))))
+                objects.append(("slot", pos, 0.0, 1.0, 1.0,
+                                ["rate=%d" % int(n.get("rate", 10) or 10), "spr=%d" % first,
+                                 "frames=%d" % len(frames)], True))
+                node_of.append(n)
+                continue
+            if base == "slot_machine.tscn":  # slot_machine.gd: baked as it stands; the game code scores the reels
+                pos = S.apply(S.global_xform(n), (0, 0))
+                objects.append(("slotmachine", pos, 0.0, 1.0, 1.0,
+                                ["skull_num=%d" % int(n.get("skull_num", 30) or 30)], True))
+                node_of.append(n)
             if base in SKIP_SCENES:
                 dynamic_roots.add(id(n))
                 continue
@@ -318,9 +454,9 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                           "b_score_value=%s" % _fmt(int(n.get("b_score_value", 0) or 0)),
                           "rotate=%s" % _fmt(float(n.get("b_rotate", 0) or 0)),
                           "e_x=%s" % _fmt(ep[0]), "e_y=%s" % _fmt(ep[1])]
-                ets = n.get("enemy_to_spawn")
-                ek = "skull" if ets is not None and "skull" in str(getattr(ets, "path", ets)) else "car"
-                params.append("enemy=%d" % (1 if ek == "skull" else 0))
+                ei = _enemy_kind(n.get("enemy_to_spawn"))
+                ek = ("car", "skull", "chuckle")[ei]
+                params.append("enemy=%d" % ei)
                 cp = render_spawned(project, tc, ek, float(n.get("b_rotate", 0) or 0), shade)
                 if cp is not None:
                     params.append("spr2=%d" % _dyn_sprite(dyn, cp))
@@ -328,6 +464,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                 if door is not None:
                     params.append("spr=%d" % _dyn_sprite(dyn, door))
                 objects.append(("police", (0.0, 0.0), 0.0, 1.0, 1.0, params, True))
+                node_of.append(n)
                 continue
             zk = ZONES.get(base)
             if zk:
@@ -351,18 +488,38 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                     if pic is not None:
                         params.append("spr=%d" % _dyn_sprite(dyn, pic))
                     if kind == "spawner":  # what it spawns, turned the way it drives
-                        ets = n.get("enemy_to_spawn")
-                        ek = "skull" if ets is not None and "skull" in str(getattr(ets, "path", ets)) else "car"
+                        ek = ("car", "skull", "chuckle")[_enemy_kind(n.get("enemy_to_spawn"))]
                         cp = render_spawned(project, tc, ek, float(n.get("b_rotate", 0) or 0),
                                             S.color(p.get("level_shade")))
                         if cp is not None:
                             params.append("spr2=%d" % _dyn_sprite(dyn, cp))
+                    if kind == "switch" and not n.get("keep_face"):  # the face for switchState 1
+                        sp = n.child("Sprite2D")
+                        if sp is not None:
+                            sp.props["frame"] = 1
+                            pic2 = _render_object(project, tc, n, kind, S.color(p.get("level_shade")))
+                            sp.props["frame"] = 0
+                            if pic2 is not None:
+                                params.append("spr2=%d" % _dyn_sprite(dyn, pic2))
+                    if kind == "scoin":
+                        params.append("ring=%d" % coin_ring.get(id(n), -1))
+                    if kind == "doggoal":
+                        tg = tile_groups.get(goal_tiles.get(id(n)))
+                        params.append("group=%d" % (tg[0] if tg else 0))
                     if kind == "keydoor":
                         lk = _render_lock(project, tc, n)
                         if lk is not None:
                             params.append("spr2=%d" % _dyn_sprite(dyn, lk))
                 objects.append((kind, pos, rot, sx, sy, params, n.get("visible", True) is not False))
+                node_of.append(n)
                 continue
+    # slot -> the index of its token among the level's coins and tokens (the game's coin list order)
+    coin_index = {}
+    for i, (kind, *_rest) in enumerate(objects):
+        if kind in ("coin", "token"):
+            coin_index[id(node_of[i])] = len(coin_index)
+    for oi, tok in slot_links:
+        objects[oi][5].append("coin=%d" % coin_index.get(id(tok), -1) if tok is not None else "coin=-1")
     if isinstance(win_conf, str) and win_conf:
         wc = root.find(win_conf)
         if wc is not None:
@@ -389,6 +546,12 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
             continue
         if n.type == "CanvasLayer" or S.in_canvas_layer(n):
             continue
+        if n.type == "TileMapLayer" and id(n) in tile_groups:
+            polys = []
+            B.draw_tilemap(None, tc, project, n, S.global_xform(n), (1, 1, 1, 1), collect=polys)
+            for bits, pts in polys:
+                shapes.append(("gpoly", bits, (tile_groups[id(n)][0], pts)))
+            continue  # drawn on its own below
         if n.type == "TileMapLayer":
             xf = S.global_xform(n)
             if n.get("enabled", True) is not False:
@@ -409,7 +572,8 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
             continue
         if not S.visible(n):
             continue
-        if n.type in ("Sprite2D", "AnimatedSprite2D", "Polygon2D", "TileMapLayer", "PointLight2D", "NinePatchRect"):
+        if n.type in ("Sprite2D", "AnimatedSprite2D", "Polygon2D", "TileMapLayer", "PointLight2D", "NinePatchRect") \
+                and id(n) not in tile_groups:
             draw_items.append(n)
         elif n.scene and not in_dynamic(n):
             pass  # instanced deco: its children are walked and drawn individually
@@ -445,6 +609,39 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
         over.multiply(modulate_canvas)
     for n, xf in lights:
         B.draw_light(under, tc, n, xf)
+    # each switchable layer: its own picture file (<id>_t<group>.t3x; too big for the object atlas),
+    # drawn while the layer is on
+    os.makedirs(out_dir, exist_ok=True)
+    tile_files = []
+    for gid, role, idx, t in sorted(tile_groups.values(), key=lambda v: v[0]):
+        pic = []
+        if S.visible(t):
+            cv = B.Canvas(int(2 * bounds * DYN_PX), -bounds, -bounds, DYN_PX)
+            B.draw_tilemap(cv, tc, project, t, S.global_xform(t), S.global_modulate(t))
+            if modulate_canvas is not None:
+                cv.multiply(modulate_canvas)
+            img = cv.image()
+            a = np.asarray(img)[..., 3]
+            ys, xs = np.nonzero(a)
+            if len(xs):
+                x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+                crop = img.crop((x0, y0, x1, y1))
+                px = DYN_PX
+                while max(crop.size) > 1024:  # tex3ds tops out at 1024: halve it
+                    crop = crop.resize(((crop.size[0] + 1) // 2, (crop.size[1] + 1) // 2))
+                    px *= 0.5
+                fp = os.path.join(out_dir, "%s_t%d.png" % (out_name, gid))
+                crop.save(fp)
+                tile_files.append((gid, fp))
+                f = px / DYN_PX
+                pic = ["tex=1", "ax=%s" % _fmt(float(bounds * DYN_PX - x0) * f),
+                       "ay=%s" % _fmt(float(bounds * DYN_PX - y0) * f), "px=%s" % _fmt(px)]
+        z = S.global_z(t)
+        layer_over = not (z < 0 or (z == 0 and t.index < player_index))
+        on = (idx == 0) if role == 0 else (t.get("enabled", True) is not False)  # level.gd switch(): state 0
+        objects.append(("tiles", (0.0, 0.0), 0.0, 1.0, 1.0,
+                        ["group=%d" % gid, "role=%d" % role, "idx=%d" % idx, "on=%d" % (1 if on else 0),
+                         "over=%d" % (1 if layer_over else 0)] + pic, True))
 
     os.makedirs(out_dir, exist_ok=True)
     img_u = under.image().convert("RGB")
@@ -466,7 +663,10 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
              "flags %s" % " ".join(f for f in LEVEL_FLAGS if p.get(f)),
              "image %d %s" % (size, "uo" if has_over else "u")]
     for kind, bits, data in shapes:
-        if kind == "poly":
+        if kind == "gpoly":
+            gid, pts = data
+            lines.append("gpoly %d %d %d %s" % (gid, bits, len(pts), " ".join("%s %s" % (_fmt(x), _fmt(y)) for x, y in pts)))
+        elif kind == "poly":
             lines.append("poly %d %d %s" % (bits, len(data), " ".join("%s %s" % (_fmt(x), _fmt(y)) for x, y in data)))
         else:
             lines.append("circ %d %s %s %s" % (bits, _fmt(data[0]), _fmt(data[1]), _fmt(data[2])))
@@ -486,7 +686,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
     with open(os.path.join(out_dir, out_name + ".txt"), "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
     return {"id": lid, "bounds": bounds, "shapes": len(shapes), "objects": len(objects), "over": has_over,
-            "dyn": dyn_files}
+            "dyn": dyn_files, "tiles": tile_files}
 
 
 def _dyn_sprite(dyn, pic):

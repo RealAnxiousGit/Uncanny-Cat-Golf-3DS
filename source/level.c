@@ -6,7 +6,9 @@
 #include "ucg.h"
 
 static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "dblock", "keydoor", "key", "skull",
-                                               "token", "jumppad", "spawner", "car", "police"};
+                                               "token", "jumppad", "spawner", "car", "police",
+                                               "slot", "slotmachine", "switch", "dog", "doggoal", "ring",
+                                               "scoin", "tiles"};
 
 void shape_update_bbox(Shape *s) {
     if (s->kind == SHAPE_CIRCLE) {
@@ -61,7 +63,7 @@ bool level_load(LevelDef *lv, const char *path) {
             char which[8] = {0};
             sscanf(rest, "%d %7s", &lv->image_size, which);
             lv->has_over = strchr(which, 'o') != NULL;
-        } else if (!strcmp(key, "poly") || !strcmp(key, "circ")) {
+        } else if (!strcmp(key, "poly") || !strcmp(key, "circ") || !strcmp(key, "gpoly")) {
             if (lv->nshapes == cap_s) {
                 cap_s *= 2;
                 lv->shapes = realloc(lv->shapes, cap_s * sizeof(Shape));
@@ -69,8 +71,9 @@ bool level_load(LevelDef *lv, const char *path) {
             Shape *s = &lv->shapes[lv->nshapes];
             memset(s, 0, sizeof(*s));
             char *p = rest;
-            s->layers = (uint32_t)strtoul(p, &p, 10);
-            if (key[0] == 'p') {
+            if (key[0] == 'g') s->group = (uint8_t)strtol(p, &p, 10); // gpoly <group> <layers> ...
+            s->layers = s->base = (uint32_t)strtoul(p, &p, 10);
+            if (key[0] == 'p' || key[0] == 'g') {
                 s->kind = SHAPE_POLY;
                 s->n = (int)strtol(p, &p, 10);
                 if (s->n < 3) continue;

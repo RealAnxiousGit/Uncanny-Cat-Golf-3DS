@@ -38,11 +38,21 @@ enum {
     EV_OB = 1 << 12, EV_PAUSE = 1 << 13, EV_GRAZE = 1 << 14,
     EV_DBLOCK = 1 << 15, EV_KEYDOOR = 1 << 16, EV_KEY = 1 << 17, EV_SKULL = 1 << 18,
     EV_SPLASH = 1 << 19, EV_WATER_DEATH = 1 << 20,
-    EV_BOOST = 1 << 21, EV_JUMP = 1 << 22, EV_CAR = 1 << 23, EV_POLICE = 1 << 24,
+    EV_BOOST = 1 << 21, EV_JUMP = 1 << 22, EV_CAR = 1 << 23, EV_POLICE = 1 << 24, EV_SLOTS = 1 << 25,
 };
+// World 3 (past an int's bits, so events is 64 bits wide)
+#define EV_SWITCH (1ull << 26)
+#define EV_DOGBUMP (1ull << 27)
+#define EV_DOGWIN (1ull << 28)
+#define EV_CHUCKLE (1ull << 29)
+#define EV_RING (1ull << 30)
+#define EV_SCOIN (1ull << 31)
+#define EV_RINGWIN (1ull << 32)
+#define EV_RINGFAIL (1ull << 33)
 
 // Thought animations the top screen should show (thought_displayer categories)
-enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL, TH_CAR, TH_JUMP, TH_POLICE };
+enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL, TH_CAR, TH_JUMP, TH_POLICE,
+       TH_CHUCKLE, TH_DOG };
 
 typedef struct {
     // positions are in the original's viewport pixels: the course is 0..512 on both axes
@@ -62,7 +72,18 @@ typedef struct {
 #define MAX_DEMO_SHOTS 16
 #define MAX_BODIES 64   // blocks, key doors, skulls and cars (they collide)
 #define MAX_PADS 16
+#define MAX_SLOTS 4
+// slot_machine.gd results: which marquee text and sound (slot_sound) to use
+enum { SLOT_DEFAULT, SLOT_JACKPOT, SLOT_HAPPY, SLOT_OK, SLOT_QUESTION, SLOT_PHONE, SLOT_CHERRY, SLOT_EYE, SLOT_BLUE,
+       SLOT_SAD, SLOT_SKULL, SLOT_CLOSE, SLOT_GOOD, SLOT_BAD, SLOT_LOSE };
 #define MAX_SPAWNERS 16
+#define MAX_TILES 8
+#define MAX_DOGGOALS 4
+#define MAX_RINGS 8
+#define MAX_SCOINS 48
+// smiley_ring.gd: the ring goes (or resets) when its win / lose sound finishes; these are their lengths
+#define RING_WIN_TIME 1.826f
+#define RING_FAIL_TIME 1.371f
 #define MAX_KEYS 12
 #define MAX_ZONES 16
 
@@ -79,6 +100,11 @@ typedef struct {
     int score, spr, spr2;
     bool dblock_score;
     float pitch_lo, pitch_hi;
+    bool chaser, chuckle;      // baddie.gd chaser (chuckle.tscn)
+    float chase_accel, chase_limit;
+    bool bounce, winner;       // dog_golf.gd bounce_off_player, winner
+    int goal;                  // the dog goal it went into
+    float dscale;              // dog_golf.gd sprite.scale (0.064, shrinking once it wins)
     float lock_a;      // the door's lock, fading while a matching key is held
     int popup_score;
     float popup;
@@ -135,10 +161,37 @@ typedef struct {
     int npads;    // jump_pad.gd
     struct { vec2 pos; float r, dir, speed_granted; int spr; bool in; } pads[MAX_PADS];
     int nspawners; // baddie_spawner.gd
-    struct { vec2 pos, dir; float speed, rotate; int score, rate, countdown, max, count, spr, car_spr; bool skull, ignorey; } spawners[MAX_SPAWNERS];
+    struct { vec2 pos, dir; float speed, rotate; int score, rate, countdown, max, count, spr, car_spr; bool skull, ignorey, hidden; int enemy; } spawners[MAX_SPAWNERS];
     int jump_timer, jump_pad; // PJump.anim_timer; the pad whose player_jump is due (-1 = none)
     const ObjDef *police;     // police_event.gd settings (the level's "police" object), NULL when none
     bool police_done;         // the event frees itself after it fires
+    // slot.gd reels and slot_machine.gd
+    int nslots;
+    struct { vec2 pos; int frame, rate, cur, coin, spr, nframes; bool spinning; } slots[MAX_SLOTS];
+    bool has_slot_machine;
+    vec2 slot_machine_pos;
+    int skull_num, slots_stopped;
+    int slot_result;          // SLOT_*: the marquee's text
+    bool slot_eyes;           // GAME_SlotsEye: the eyes appear
+    float blue;               // GAME_SlotsBlue: the blue screen's alpha (0 -> 1 over a second)
+    // level.gd switch_tiles and dog_goal.gd dog_tiles: tile layers turned on and off
+    int ntiles;
+    struct { int group, role, idx, spr; bool on, over; } tiles[MAX_TILES];
+    int switch_state, nswitch;
+    float switch_pitch;
+    int ndoggoals;
+    struct { vec2 pos; float r; int group, spr; bool taken; } doggoals[MAX_DOGGOALS];
+    // smiley_ring.gd and smiley_coin.gd
+    int nrings;
+    struct {
+        vec2 pos;
+        float r, time_given, left, after, color[3];
+        int score, spr, grabbed, ncoins;
+        bool bell, redoable, running, gone, won;
+    } rings[MAX_RINGS];
+    int nscoins;
+    struct { vec2 pos; float r; int ring, spr, count; bool active; float popup; } scoins[MAX_SCOINS];
+    float scoin_pitch;
     int moving_type;          // PMoving.enter(type): 1 keeps the coin multiplier
     int nbodies;
     Body bodies[MAX_BODIES];
@@ -168,7 +221,7 @@ typedef struct {
     DemoShot demo[MAX_DEMO_SHOTS];
     int demo_timer;
 
-    uint32_t events;
+    uint64_t events;
     int thought;
 } Game;
 

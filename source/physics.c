@@ -160,12 +160,14 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
                 best = i;
                 break;
             }
-            // godot_space_2d.cpp: an overlap test at each step, splitting 0.25/0.75 instead of in half
+            // godot_space_2d.cpp: a swept test at each step, splitting 0.25/0.75 instead of in half
             // once it keeps landing on the same side
             float lo = 0, hi = 1, coeff = 0.5f;
             for (int k = 0; k < CAST_STEPS; k++) {
                 float f = lo + (hi - lo) * coeff;
-                if (separation(s, v2add(p, v2mul(motion, f)), r, NULL) < 0) {
+                // CollisionSolver2D::solve with motion * fraction: the shape swept from the start, so a
+                // fast body can't skip over a thin wall between two probes
+                if (sweep_hits(s, p, v2add(p, v2mul(motion, f)), r)) {
                     hi = f;
                     coeff = (k == 0 || lo > 0) ? 0.5f : 0.25f;
                 } else {

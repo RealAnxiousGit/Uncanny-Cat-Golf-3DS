@@ -32,7 +32,7 @@ static void load_index(const char *romfs, int world) {
 }
 
 typedef struct {
-    uint32_t events;
+    uint64_t events;
     bool lose, win, sand;
     int death, frames, keys_held, bodies_alive;
     vec2 end;
@@ -41,11 +41,16 @@ typedef struct {
     float jump_scale;                     // biggest sprite scale while jumping
     bool jump_landed;                     // back to rolling after the jump
     int cars_max;                         // most cars on the course at once
+    float chase_max;                      // fastest chaser
+    int switch_state, groups_on, group_shapes_on; // tile layers at the end
+    int scoins;                           // smiley coins taken
+    bool dog_moved;
 } Run;
 
 static int alive_bodies(const Game *g) {
     int n = 0;
-    for (int i = 0; i < g->nbodies; i++) n += g->bodies[i].alive;
+    for (int i = 0; i < g->nbodies; i++) // blocks and doors only: spawned baddies come and go
+        n += g->bodies[i].alive && (g->bodies[i].type == OBJ_DBLOCK || g->bodies[i].type == OBJ_KEYDOOR);
     return n;
 }
 
@@ -82,7 +87,15 @@ static Run play_at(const LevelDef *lv, const DemoShot *shots, int n, const vec2 
         int cars = 0;
         for (int i = 0; i < g.nbodies; i++) cars += g.bodies[i].alive && (g.bodies[i].type == OBJ_CAR || g.bodies[i].owner >= 0);
         if (cars > r.cars_max) r.cars_max = cars;
-        if (g.strokes >= n && r.frames - last_shot_frame > 30 && g.vel.x == 0 && g.vel.y == 0) break;
+        for (int i = 0; i < g.nbodies; i++) {
+            const Body *b = &g.bodies[i];
+            if (b->alive && b->chaser && v2len(b->vel) > r.chase_max) r.chase_max = v2len(b->vel);
+            if (b->type == OBJ_DOG && v2len2(b->vel) > 0) r.dog_moved = true;
+        }
+        if (g.events & EV_SCOIN) r.scoins++;
+        bool ring_busy = false; // let a started ring finish
+        for (int i = 0; i < g.nrings; i++) ring_busy |= g.rings[i].running || g.rings[i].after > 0;
+        if (!ring_busy && g.strokes >= n && r.frames - last_shot_frame > 30 && g.vel.x == 0 && g.vel.y == 0) break;
     }
     r.lose = g.lose;
     r.win = g.victory;
@@ -90,6 +103,9 @@ static Run play_at(const LevelDef *lv, const DemoShot *shots, int n, const vec2 
     r.keys_held = g.nheld;
     r.bodies_alive = alive_bodies(&g);
     r.end = g.pos;
+    r.switch_state = g.switch_state;
+    for (int t = 0; t < g.ntiles; t++) r.groups_on += g.tiles[t].on;
+    for (int i = 0; i < g.lv.nshapes; i++) r.group_shapes_on += g.lv.shapes[i].group && g.lv.shapes[i].layers;
     return r;
 }
 
@@ -140,6 +156,25 @@ int main(int argc, char **argv) {
         bool want_db = nobj[OBJ_DBLOCK], want_door = nobj[OBJ_KEYDOOR] && nobj[OBJ_KEY], want_key = nobj[OBJ_KEY],
              want_skull = nobj[OBJ_SKULL], want_sand = nsand, want_water = nwater;
         bool got_db = false, got_key = false, got_door = false, got_skull = false, got_sand = false, got_water = false;
+        // World 3
+        int ngroup_shapes = 0;
+        for (int i = 0; i < lv.nshapes; i++) ngroup_shapes += lv.shapes[i].group != 0;
+        if (nobj[OBJ_TILES] || nobj[OBJ_SWITCH] || nobj[OBJ_DOG] || nobj[OBJ_RING] || nobj[OBJ_SCOIN])
+            printf("      tiles %d (%d shapes) switch %d dog %d doggoal %d ring %d scoin %d\n", nobj[OBJ_TILES],
+                   ngroup_shapes, nobj[OBJ_SWITCH], nobj[OBJ_DOG], nobj[OBJ_DOGGOAL], nobj[OBJ_RING], nobj[OBJ_SCOIN]);
+        int nchasers = 0;
+        for (int i = 0; i < lv.nobjs; i++)
+            nchasers += (lv.objs[i].type == OBJ_SKULL && obj_param(&lv.objs[i], "chaser", 0)) ||
+                        (lv.objs[i].type == OBJ_SPAWNER && obj_param(&lv.objs[i], "enemy", 0) == 2);
+        bool want_switch = nobj[OBJ_SWITCH], want_ring = nobj[OBJ_RING], want_dog = nobj[OBJ_DOG],
+             want_chase = nchasers > 0;
+        bool got_switch = false, got_ring = false, got_ringwin = false, got_dogwin = false, got_chase = false,
+             got_chuckle = false, dog_moves = false;
+        if (nobj[OBJ_TILES] && !ngroup_shapes) printf("   tiles  : NO SHAPES IN THE GROUPS\n"), fails++;
+        if (nobj[OBJ_SCOIN] && !nobj[OBJ_RING]) printf("   scoin  : NO RING\n"), fails++;
+        for (int i = 0; i < lv.nobjs; i++)
+            if (lv.objs[i].type == OBJ_SCOIN && obj_param(&lv.objs[i], "ring", -1) < 0)
+                printf("   scoin  : coin %d HAS NO RING\n", i), fails++;
         DemoShot key_shot = {0};
         for (int p = 0; p < NP; p++)
             for (int a = 0; a < 360; a += 3) {
@@ -187,6 +222,36 @@ int main(int argc, char **argv) {
                     printf("   sand   : angle %3d power %4.0f -> claimed, speed %.1f then %.1f (ratio %.3f, want 0.85)\n",
                            a, s.power, r.sand_speed_in, r.sand_speed_next,
                            r.sand_speed_in > 0 ? r.sand_speed_next / r.sand_speed_in : 0);
+                }
+                if (want_switch && !got_switch && (r.events & EV_SWITCH)) {
+                    got_switch = true;
+                    printf("   switch : angle %3d power %4.0f -> hit, state %d, layers on %d, their shapes on %d\n", a,
+                           s.power, r.switch_state, r.groups_on, r.group_shapes_on);
+                }
+                if (want_ring && !got_ring && (r.events & EV_RING)) {
+                    got_ring = true;
+                    printf("   ring   : angle %3d power %4.0f -> started, %d coins taken, %s\n", a, s.power, r.scoins,
+                           (r.events & EV_RINGWIN) ? "passed" : (r.events & EV_RINGFAIL) ? "failed (time)" : "NO RESULT");
+                    if (!(r.events & (EV_RINGWIN | EV_RINGFAIL))) fails++;
+                }
+                if (want_ring && !got_ringwin && (r.events & EV_RINGWIN)) {
+                    got_ringwin = true;
+                    printf("   ring   : angle %3d power %4.0f -> PASSED with %d coins\n", a, s.power, r.scoins);
+                }
+                if (want_dog && r.dog_moved) dog_moves = true;
+                if (want_dog && !got_dogwin && (r.events & EV_DOGWIN)) {
+                    got_dogwin = true;
+                    printf("   dog    : angle %3d power %4.0f -> dog in the goal, layers on %d\n", a, s.power, r.groups_on);
+                }
+                if (want_chase && !got_chase && r.chase_max > 0) {
+                    got_chase = true;
+                    printf("   chase  : chasers move, up to %.1f (limit 200)\n", r.chase_max);
+                    if (r.chase_max > 200.5f) fails++;
+                }
+                if (want_chase && !got_chuckle && (r.events & EV_CHUCKLE)) {
+                    got_chuckle = true;
+                    printf("   chuckle: angle %3d power %4.0f -> killed, %s\n", a, s.power,
+                           r.lose ? "cat died after" : "cat carried on");
                 }
                 if (want_key && !got_key && (r.events & EV_KEY) && !r.lose) {
                     got_key = true;
@@ -246,6 +311,12 @@ int main(int argc, char **argv) {
         MISS(want_sand, got_sand, "sand");
         MISS(want_key, got_key, "key");
         MISS(want_door && got_key, got_door, "door");
+        MISS(want_switch, got_switch, "switch");
+        MISS(want_ring, got_ring, "ring");
+        MISS(want_dog, got_dogwin, "dog");
+        if (want_dog) printf("   dog    : %s\n", dog_moves ? "dogs move" : "dogs stay put (speed 0)");
+        if (want_chase && !got_chase) printf("   chase  : CHASERS NEVER MOVED\n"), fails++;
+        MISS(want_chase, got_chuckle, "chuckle");
         level_free(&lv);
     }
     printf("\nfailures: %d\n", fails);

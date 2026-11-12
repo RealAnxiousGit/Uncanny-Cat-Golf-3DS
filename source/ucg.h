@@ -32,7 +32,9 @@ static inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 enum { SHAPE_POLY, SHAPE_CIRCLE };
 typedef struct {
     uint8_t kind;
-    uint32_t layers;
+    uint8_t group;   // a switchable tile layer's shapes (0: always there)
+    uint32_t layers; // 0 while switched off
+    uint32_t base;   // its layers when on
     int n;          // polygon points
     vec2 *pts;
     vec2 c;         // circle centre
@@ -42,7 +44,8 @@ typedef struct {
 
 enum {
     OBJ_PLAYER, OBJ_GOAL, OBJ_GHOST, OBJ_COIN, OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_KEY, OBJ_SKULL,
-    OBJ_TOKEN, OBJ_JUMPPAD, OBJ_SPAWNER, OBJ_CAR, OBJ_POLICE, OBJ_COUNT
+    OBJ_TOKEN, OBJ_JUMPPAD, OBJ_SPAWNER, OBJ_CAR, OBJ_POLICE, OBJ_SLOT, OBJ_SLOTMACHINE,
+    OBJ_SWITCH, OBJ_DOG, OBJ_DOGGOAL, OBJ_RING, OBJ_SCOIN, OBJ_TILES, OBJ_COUNT
 };
 
 #define MAX_PARAMS 24

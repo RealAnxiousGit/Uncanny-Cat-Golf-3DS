@@ -276,6 +276,37 @@ void sfx_play(const char *rel, float pitch, float volume) {
     ndspChnWaveBufAdd(ch, wb);
 }
 
+#define LOOP_CH (SFX_CHANNELS + 1)
+static Sfx *loop_sfx;
+static ndspWaveBuf loop_wb;
+
+void sfx_loop(const char *rel, float pitch) {
+    if (!ok) return;
+    if (pitch <= 0 || vol_sound <= 0 || vol_master <= 0) {
+        if (loop_sfx) ndspChnWaveBufClear(LOOP_CH);
+        loop_sfx = NULL;
+        return;
+    }
+    if (!loop_sfx) {
+        Sfx *s = find_or_load(rel);
+        if (!s || !s->frames) return;
+        ndspChnWaveBufClear(LOOP_CH);
+        ndspChnReset(LOOP_CH);
+        ndspChnSetInterp(LOOP_CH, NDSP_INTERP_LINEAR);
+        ndspChnSetFormat(LOOP_CH, s->channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
+        float mix[12] = {0};
+        mix[0] = mix[1] = vol_master * vol_sound;
+        ndspChnSetMix(LOOP_CH, mix);
+        memset(&loop_wb, 0, sizeof(loop_wb));
+        loop_wb.data_vaddr = s->pcm;
+        loop_wb.nsamples = s->frames;
+        loop_wb.looping = true;
+        ndspChnWaveBufAdd(LOOP_CH, &loop_wb);
+        loop_sfx = s;
+    }
+    ndspChnSetRate(LOOP_CH, loop_sfx->rate * pitch);
+}
+
 static void music_fill(ndspWaveBuf *wb, int16_t *data) {
     size_t want = MUSIC_BUF_SAMPLES * music_channels * sizeof(int16_t), got = 0;
     int bs;

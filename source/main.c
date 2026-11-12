@@ -324,11 +324,19 @@ static vec2 touch_to_viewport(vec2 t) {
 // side strip buttons; the left-handed layout mirrors them
 static float strip_x(float x, float w) { return set.left_handed ? BOT_W - x - w : x; }
 
+// switchable tile layers' pictures (<id>_t<group>.t3x), by the level's tiles objects in order
+static C2D_SpriteSheet tile_sheet[MAX_TILES];
+static float tile_ax[MAX_TILES], tile_ay[MAX_TILES], tile_px[MAX_TILES];
+
 static void unload_level(void) {
     if (floor_u) C2D_SpriteSheetFree(floor_u);
     if (floor_o) C2D_SpriteSheetFree(floor_o);
     if (dyn_sheet) C2D_SpriteSheetFree(dyn_sheet);
     floor_u = floor_o = dyn_sheet = NULL;
+    for (int t = 0; t < MAX_TILES; t++) {
+        if (tile_sheet[t]) C2D_SpriteSheetFree(tile_sheet[t]);
+        tile_sheet[t] = NULL;
+    }
     if (level_loaded) level_free(&level);
     level_loaded = false;
 }
@@ -368,6 +376,19 @@ static bool start_level_(int w, int l) {
     if (level.ndspr > 0) { // pictures of the blocks, doors, keys and skulls
         snprintf(path, sizeof(path), "%s/levels/w%d/%s_d.t3x", data_root(), w, wnames[w][l]);
         dyn_sheet = sheet_load(path);
+    }
+    for (int i = 0, t = 0; i < level.nobjs && t < MAX_TILES; i++) {
+        const ObjDef *o = &level.objs[i];
+        if (o->type != OBJ_TILES) continue;
+        if (obj_param(o, "tex", 0) != 0) {
+            snprintf(path, sizeof(path), "%s/levels/w%d/%s_t%d.t3x", data_root(), w, wnames[w][l],
+                     (int)obj_param(o, "group", 0));
+            tile_sheet[t] = sheet_load(path);
+            tile_ax[t] = obj_param(o, "ax", 0);
+            tile_ay[t] = obj_param(o, "ay", 0);
+            tile_px[t] = obj_param(o, "px", 1);
+        }
+        t++;
     }
     prefetch_drop(); // a picture this level turned out not to have
     PROF_END();
@@ -468,7 +489,18 @@ static void draw_fade(float w) {
 }
 
 // ---------------------------------------------------------------- sounds and thoughts
-static void play_events(uint32_t ev) {
+static void play_events(uint64_t ev) {
+    if (ev & EV_SWITCH) sfx_play("block/switch.ogg", game.switch_pitch, 1);
+    if (ev & EV_DOGBUMP) sfx_play("player/wallBump.ogg", 1, 1);
+    if (ev & EV_DOGWIN) {
+        sfx_play("gimmicks/dog_goal.ogg", 1, 1);
+        sfx_play("gimmicks/dog.ogg", 1, 1);
+    }
+    if (ev & EV_CHUCKLE) sfx_play("enemy/chuckleDeath.ogg", game.skull_pitch, 1);
+    if (ev & EV_RING) sfx_play("collectibles/smileyring.ogg", 1, 1);
+    if (ev & EV_SCOIN) sfx_play("collectibles/smileycoin.ogg", game.scoin_pitch, 1);
+    if (ev & EV_RINGWIN) sfx_play("collectibles/smileyWin.ogg", 1, 1);
+    if (ev & EV_RINGFAIL) sfx_play("collectibles/smileyFail.ogg", 1, 1);
     if (ev & EV_JOIN) sfx_play("game/levelStart.ogg", 1, 1);
     if (ev & EV_GRAB) sfx_play("player/grab.ogg", 1, 1);
     if (ev & EV_CANCEL) sfx_play("player/cancel.ogg", 1, 1);
@@ -491,6 +523,14 @@ static void play_events(uint32_t ev) {
     if (ev & EV_SKULL) sfx_play("enemy/skullDeath.ogg", game.skull_pitch, 1);
     if (ev & EV_BOOST) sfx_play("collectibles/boost.ogg", 1, 1);
     if (ev & EV_JUMP) sfx_play("gimmicks/jump_pad.ogg", 1, 1);
+    if (ev & EV_SLOTS) { // slot_machine.tscn's Sounds/* players
+        static const char *SND[] = {NULL, "gimmicks/slots_jackpot.ogg", "gimmicks/wow.ogg", "gimmicks/slots_fine.ogg",
+                                    "gimmicks/slots_question.ogg", "menu/phone_accept.ogg", "gimmicks/slots_fine.ogg",
+                                    "gimmicks/slots_look.ogg", "gimmicks/slots_blue.ogg", "gimmicks/slots_bad.ogg",
+                                    "gimmicks/slots_dead.ogg", "gimmicks/slots_bad.ogg", "gimmicks/slots_fine.ogg",
+                                    "gimmicks/slots_bad.ogg", "gimmicks/slots_fail.ogg"};
+        if (SND[game.slot_result]) sfx_play(SND[game.slot_result], 1, 1);
+    }
     if (ev & EV_POLICE) { // 2-11's "police" player: the siren and the spotlight, together
         sfx_play("gimmicks/policesiren.ogg", 1, 1);
         sfx_play("gimmicks/spotlight.ogg", 1, 1);
@@ -518,6 +558,8 @@ static void play_thought(int th) {
     case TH_CAR: thoughts_play("Car"); break;
     case TH_JUMP: thoughts_play("Jump"); break;
     case TH_POLICE: thoughts_play("Police"); thoughts_fallback("Police"); break;
+    case TH_CHUCKLE: thoughts_play("Chuckle"); break; // baddie.gd do_thought
+    case TH_DOG: thoughts_play("Dog"); break;
     case TH_WIN: thoughts_play("Win"); thoughts_fallback("Win"); break;
     case TH_DEATH: thoughts_play("Death"); thoughts_fallback("Death"); break;
     case TH_BACKROOMS: thoughts_play("Backrooms"); thoughts_fallback("Backrooms"); break;
@@ -808,6 +850,17 @@ static void draw_dyn(int spr, vec2 world, float k, u32 tint) {
     C2D_DrawImage(img, &p, &t);
 }
 
+// a switchable tile layer's picture, its anchor at the course origin
+static void draw_tiles(int t, float k) {
+    if (!tile_sheet[t]) return;
+    C2D_Image img = C2D_SpriteSheetGetImage(tile_sheet[t], 0);
+    vec2 s = world_to_screen(v2(0, 0));
+    float kk = k / tile_px[t], sx = (level.flags & LF_MIRROR) ? -kk : kk;
+    C2D_DrawParams p = {{s.x, s.y, img.subtex->width * sx, img.subtex->height * kk},
+                        {tile_ax[t] * sx, tile_ay[t] * kk}, ui_z, 0};
+    C2D_DrawImage(img, &p, NULL);
+}
+
 static void popup_text(vec2 world, int score, float popup) {
     char b[16];
     snprintf(b, sizeof(b), "%d", score);
@@ -856,17 +909,31 @@ static void draw_course(void) {
     }
     // fixed depths, bottom to top (goal.tscn: hole and flag under player.tscn's cat); citro2d keeps the
     // higher depth in front whatever the drawing order
+    ui_z = 0.15f; // switchable tile layers (their own pictures, the whole course in each)
+    for (int t = 0; t < game.ntiles; t++)
+        if (game.tiles[t].on && !game.tiles[t].over) draw_tiles(t, k);
     ui_z = 0.2f;
     if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, shade_color(1), 0);
+    for (int d = 0; d < game.ndoggoals; d++) draw_dyn(game.doggoals[d].spr, game.doggoals[d].pos, k, WHITE);
     ui_z = 0.22f; // jump pads, spawner doors
     for (int i = 0; i < game.npads; i++) draw_dyn(game.pads[i].spr, game.pads[i].pos, k, WHITE);
-    for (int i = 0; i < game.nspawners; i++) draw_dyn(game.spawners[i].spr, game.spawners[i].pos, k, WHITE);
+    for (int i = 0; i < game.nspawners; i++)
+        if (!game.spawners[i].hidden) draw_dyn(game.spawners[i].spr, game.spawners[i].pos, k, WHITE);
+    for (int i = 0; i < game.nslots; i++) // slot.gd: the reel's current symbol
+        if (game.slots[i].spr >= 0 && game.slots[i].frame < game.slots[i].nframes)
+            draw_dyn(game.slots[i].spr + game.slots[i].frame, game.slots[i].pos, k, WHITE);
     ui_z = 0.25f;
     for (int i = 0; i < game.ncoins; i++) {
         if (game.coins[i].taken) continue;
         if (game.coins[i].spr >= 0) draw_dyn(game.coins[i].spr, game.coins[i].pos, k, WHITE);
         else draw_sprite("coin", world_to_screen(game.coins[i].pos), k, 1, shade_color(1), 0);
     }
+    for (int r = 0; r < game.nrings; r++) // smiley_ring.gd: see-through once collected
+        if (!game.rings[r].gone)
+            draw_dyn(game.rings[r].spr, game.rings[r].pos, k,
+                     C2D_Color32f(1, 1, 1, game.rings[r].running || game.rings[r].after > 0 ? 0.5f : 1));
+    for (int c = 0; c < game.nscoins; c++)
+        if (game.scoins[c].active) draw_dyn(game.scoins[c].spr, game.scoins[c].pos, k, WHITE);
     // blocks, doors, keys and skulls: pictures baked by the converter with their
     // rotation, scale and shading, one world unit per pixel
     if (dyn_sheet) {
@@ -874,7 +941,12 @@ static void draw_course(void) {
         for (int i = 0; i < game.nbodies; i++) {
             const Body *b = &game.bodies[i];
             if (!b->alive) continue;
-            draw_dyn(b->spr, b->pos, k, WHITE);
+            if (b->type == OBJ_DOG) { // dog_golf.gd: shrinks into the goal
+                draw_dyn(b->spr, b->pos, k * b->dscale / 0.064f, WHITE);
+                continue;
+            }
+            // switch_block.gd change_face(): frame = switchState
+            draw_dyn(b->type == OBJ_SWITCH && game.switch_state == 1 && b->spr2 >= 0 ? b->spr2 : b->spr, b->pos, k, WHITE);
             if (b->type == OBJ_KEYDOOR && b->lock_a > 0.01f)
                 draw_dyn(b->spr2, b->pos, k, C2D_Color32f(1, 1, 1, b->lock_a));
         }
@@ -902,14 +974,55 @@ static void draw_course(void) {
         u32 col = C2D_Color32f(c[0], c[1], c[2], c[3]);
         C2D_DrawLine(a.x, a.y, col, b.x, b.y, col, fmaxf(2.0f, 4 * k), 0.6f);
     }
+    ui_z = 0.69f;
+    for (int t = 0; t < game.ntiles; t++)
+        if (game.tiles[t].on && game.tiles[t].over) draw_tiles(t, k);
     if (floor_o) {
         C2D_Image img = C2D_SpriteSheetGetImage(floor_o, 0);
         float cw = 2 * level.bounds * k, s = cw / level.image_size;
         if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.7f, NULL, -s, s);
         else C2D_DrawImageAt(img, course_left(), course_top(), 0.7f, NULL, s, s);
     }
+    // slot_machine.tscn MarqueeText: 512 wide, 20 px font, blue outline, centred on the machine
+    if (game.has_slot_machine) {
+        static const char *KEY[] = {"GAME_SlotsDefault", "GAME_SlotsJackpot", "GAME_SlotsHappy", "GAME_SlotsOk",
+                                    "GAME_SlotsQuestion", "GAME_SlotsPhone", "GAME_SlotsCherry", "GAME_SlotsEye",
+                                    "GAME_SlotsBlue", "GAME_SlotsSad", "GAME_SlotsSkull", "GAME_SlotsClose",
+                                    "GAME_SlotsGood", "GAME_SlotsBad", "GAME_SlotsLose"};
+        char msg[200];
+        const char *t = tr(KEY[game.slot_result]);
+        const char *num = strstr(t, "{number}");
+        if (num) snprintf(msg, sizeof(msg), "%.*s58259777%s", (int)(num - t), t, num + 8);
+        else snprintf(msg, sizeof(msg), "%s", t);
+        vec2 p = world_to_screen(game.slot_machine_pos);
+        ui_z = 0.74f;
+        float sz = 20.0f * k / 30.0f; // font_size 20 world units, in system-font units (30 px)
+        u32 keep = ol_color;
+        ol_color = C2D_Color32(0, 0, 255, 255);
+        text_ol_wrap(p.x, p.y - 20.0f * k, sz, WHITE, C2D_AlignCenter, 512 * k, msg);
+        ol_color = keep;
+    }
+    // smiley_ring.tscn TimeText: the seconds left, then pass / fail (20 px font, the ring's colour)
+    for (int r = 0; r < game.nrings; r++) {
+        const __typeof__(game.rings[0]) *R = &game.rings[r];
+        if (R->gone || (!R->running && R->after <= 0)) continue;
+        char msg[160];
+        int lines = 1;
+        if (R->running) snprintf(msg, sizeof(msg), "%d", (int)ceilf(R->left));
+        else if (!R->won) snprintf(msg, sizeof(msg), "%s", tr("GAME_RingFail"));
+        else if (R->score > 0) {
+            snprintf(msg, sizeof(msg), "%s\n+%d %s", tr("GAME_RingPass"), R->score, tr("GAME_RingPoints"));
+            lines = 2;
+        } else snprintf(msg, sizeof(msg), "%s", tr("GAME_RingPass"));
+        vec2 p = world_to_screen(R->pos);
+        ui_z = 0.74f;
+        text_ol_wrap(p.x, p.y - lines * 11.5f * k, 20.0f * k / 30.0f, C2D_Color32f(R->color[0], R->color[1], R->color[2], 1),
+                     C2D_AlignCenter, 128 * k, msg);
+    }
     // score popups (coins, blocks, doors, keys, skulls)
     ui_z = 0.75f;
+    for (int c = 0; c < game.nscoins; c++) // smiley_coin.gd: how many of the ring's coins so far
+        if (game.scoins[c].popup > 0) popup_text(game.scoins[c].pos, game.scoins[c].count, game.scoins[c].popup);
     for (int i = 0; i < game.ncoins; i++)
         if (game.coins[i].popup > 0) popup_text(game.coins[i].pos, game.coins[i].score, game.coins[i].popup);
     for (int i = 0; i < game.nbodies; i++)
@@ -959,6 +1072,7 @@ static void draw_course(void) {
                               C2D_Color32f(1, 0.98f, 0.4f, btn_alpha[2]));
     }
     btn_alpha_now = 1;
+    if (game.blue > 0) C2D_DrawRectSolid(0, 0, 0.96f, BOT_W, SCR_H, C2D_Color32f(0, 0, 1, 0.392f * game.blue));
 }
 
 // ---------------------------------------------------------------- top screen
@@ -1034,6 +1148,8 @@ static void draw_top_hud(void) {
         text(58, 176, 0.75f, tc, C2D_AlignCenter, v);
         text(104, 184, 0.45f, tc, C2D_AlignCenter, ms);
     }
+    // 2-17's "Blue" CanvasLayer (layer 15, over the whole window): blue at 39% alpha, faded in
+    if (game.blue > 0) C2D_DrawRectSolid(0, 0, 0.96f, 400, SCR_H, C2D_Color32f(0, 0, 1, 0.392f * game.blue));
 }
 
 static void draw_results_top(void) {
@@ -1696,7 +1812,11 @@ static const char *const PRELOAD[] = {
     "player/water_splash3.ogg", "collectibles/coin.ogg", "collectibles/key.ogg", "block/dblock.ogg",
     "block/keydoor.ogg", "enemy/skullDeath.ogg", "collectibles/boost.ogg", "gimmicks/jump_pad.ogg",
     "enemy/carDeath.ogg", "enemy/carHorn1.ogg", "enemy/carHorn2.ogg", "gimmicks/policesiren.ogg",
-    "gimmicks/spotlight.ogg", "ghost/defaultJumpscare.ogg", "game/deathOB.ogg",
+    "gimmicks/spotlight.ogg", "block/switch.ogg", "gimmicks/dog_goal.ogg", "gimmicks/dog.ogg",
+    "enemy/chuckleDeath.ogg", "collectibles/smileyring.ogg", "collectibles/smileycoin.ogg",
+    "collectibles/smileyWin.ogg", "collectibles/smileyFail.ogg", "collectibles/smileytimer.ogg", "gimmicks/slots_jackpot.ogg", "gimmicks/wow.ogg", "gimmicks/slots_fine.ogg",
+    "gimmicks/slots_question.ogg", "menu/phone_accept.ogg", "gimmicks/slots_look.ogg", "gimmicks/slots_blue.ogg",
+    "gimmicks/slots_bad.ogg", "gimmicks/slots_dead.ogg", "gimmicks/slots_fail.ogg", "ghost/defaultJumpscare.ogg", "game/deathOB.ogg",
     "game/levelStart.ogg", "game/levelWin.ogg", "game/resultsDrumroll.ogg", "game/rankAtrocious.ogg",
     "game/rankErm.ogg", "game/rankOK.ogg", "game/rankPeak.ogg", "game/rankSwag.ogg",
     "gimmicks/screamsOfDeadPeople.ogg", "minigame/meowl_die.ogg"};
@@ -1995,6 +2115,13 @@ int main(void) {
 
         PROF_MARK("logic");
         music_update();
+        { // smiley_ring.gd timeSound: loops while a ring runs, its pitch rising as the time runs out
+            float pitch = 0;
+            for (int r = 0; state == ST_PLAY && r < game.nrings && pitch == 0; r++)
+                if (game.rings[r].running && game.rings[r].time_given > 0)
+                    pitch = lerpf(3.0f, 0.5f, game.rings[r].left / game.rings[r].time_given);
+            sfx_loop("collectibles/smileytimer.ogg", pitch);
+        }
         PROF_MARK("music");
         thoughts_update(1.0f / 60);
         PROF_MARK("thoughts");
