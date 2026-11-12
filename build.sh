@@ -3,6 +3,7 @@
 #   ./build.sh convert [--worlds 0] [--keep-png]   convert the game's files into build/romfs
 #   ./build.sh 3ds [make args]                      build UncannyCatGolf.3dsx (and `cia`)
 #   ./build.sh sim                                  build and run the PC physics check
+#   ./build.sh gimtest <world> [level]              try shots at each gimmick on the PC
 # SOURCE points at the unpacked "Uncanny Cat Golf (source)" folder.
 set -e
 export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
@@ -32,6 +33,10 @@ case "$cmd" in
   sim)
     nice -n 10 make -C pc -j3
     ./pc/ucgsim "$WORK/build/romfs" "$SOURCE" "$@"
+    ;;
+  gimtest)
+    nice -n 10 make -C pc -j3 gimtest
+    ./pc/gimtest "$WORK/build/romfs" "$@"
     ;;
   *) echo "unknown command $cmd"; exit 1 ;;
 esac

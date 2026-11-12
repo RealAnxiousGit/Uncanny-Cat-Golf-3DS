@@ -3,6 +3,7 @@ build/
 gen/
 romfs/
 pc/ucgsim
+pc/gimtest
 *.elf
 *.3dsx
 *.smdh
