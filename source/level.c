@@ -8,7 +8,7 @@
 static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "dblock", "keydoor", "key", "skull",
                                                "token", "jumppad", "spawner", "car", "police",
                                                "slot", "slotmachine", "switch", "dog", "doggoal", "ring",
-                                               "scoin", "tiles"};
+                                               "scoin", "tiles", "lights", "ashbaby"};
 
 void shape_update_bbox(Shape *s) {
     if (s->kind == SHAPE_CIRCLE) {
@@ -127,7 +127,8 @@ bool level_load(LevelDef *lv, const char *path) {
             memset(&z, 0, sizeof(z));
             z.kind = SHAPE_POLY;
             z.layers = !strcmp(kind, "sand") ? ZONE_SAND : !strcmp(kind, "water") ? ZONE_WATER
-                     : !strcmp(kind, "police") ? ZONE_POLICE : 0;
+                     : !strcmp(kind, "police") ? ZONE_POLICE : !strcmp(kind, "lights") ? ZONE_LIGHTS
+                     : !strcmp(kind, "ashbaby") ? ZONE_ASHBABY : 0;
             z.n = (int)strtol(p, &p, 10);
             if (!z.layers || z.n < 3) continue;
             z.pts = malloc(z.n * sizeof(vec2));

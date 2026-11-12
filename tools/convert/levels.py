@@ -408,6 +408,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                        and all(abs(a - b) < 1e-3 for a, b in zip(S.color(c.get("modulate")), col))]
         for c in members:
             coin_ring.setdefault(id(c), ri)
+    lights_hidden = set()  # lights_out_event.gd: what goes dark (baked again without it: <id>_u2 / _o2)
     node_of = []  # the scene node behind each object, to link slots to their tokens
     slot_links = []  # (object index, token node)
     for n in root.walk():
@@ -464,6 +465,21 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                 if door is not None:
                     params.append("spr=%d" % _dyn_sprite(dyn, door))
                 objects.append(("police", (0.0, 0.0), 0.0, 1.0, 1.0, params, True))
+                node_of.append(n)
+                continue
+            if base in ("lights_out_event.tscn", "ash_baby_event.tscn"):  # CustomEvent areas, once each
+                dynamic_roots.add(id(n))
+                ek = "lights" if base.startswith("lights") else "ashbaby"
+                for poly in _zone_polys(n):
+                    zones.append((ek, poly))
+                params = ["score_value=%d" % int(n.get("score_value", 0) or 0)]
+                if ek == "lights":
+                    for path in [n.get("affected_tiles")] + list(n.get("affected_deco") or []):
+                        t = _resolve(n, path) if path else None
+                        if t is not None:
+                            lights_hidden.add(id(t))
+                    params.append("goal=%d" % (1 if n.get("affected_goal") else 0))
+                objects.append((ek, (0.0, 0.0), 0.0, 1.0, 1.0, params, True))
                 node_of.append(n)
                 continue
             zk = ZONES.get(base)
@@ -538,6 +554,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
         report.append("%s: no player found" % lid)
 
     # collision + drawables
+    modulate_node = None
     shapes = []
     draw_items = []
     modulate_canvas = None
@@ -568,6 +585,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                 report.append("%s: moving body %s treated as static" % (lid, n.path()))
         if n.type == "CanvasModulate" and S.visible(n):
             modulate_canvas = S.color(n.get("color"))
+            modulate_node = n
         if n.type in SKIP_TYPES:
             continue
         if not S.visible(n):
@@ -583,32 +601,22 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
 
     size = 512 if bounds <= 256 else 1024
     scale = size / (2.0 * bounds)
-    under = B.Canvas(size, -bounds, -bounds, scale)
-    over = B.Canvas(size, -bounds, -bounds, scale)
-    lights = []
     draw_items.sort(key=lambda n: (S.global_z(n), n.index))
-    for n in draw_items:
-        z = S.global_z(n)
-        target = under if (z < 0 or (z == 0 and n.index < player_index)) else over
-        xf = S.global_xform(n)
-        mod = S.global_modulate(n)
-        if n.type == "Sprite2D":
-            B.draw_sprite(target, tc, n, xf, n.get("texture"), mod)
-        elif n.type == "AnimatedSprite2D":
-            B.draw_sprite(target, tc, n, xf, B.frame_texture(n), mod)
-        elif n.type == "Polygon2D":
-            B.draw_polygon(target, tc, n, xf, mod)
-        elif n.type == "TileMapLayer":
-            B.draw_tilemap(target, tc, project, n, xf, mod)
-        elif n.type == "PointLight2D":
-            lights.append((n, xf))
-        elif n.type == "NinePatchRect":
-            B.draw_ninepatch(target, tc, n, S.global_xform(n.parent), mod)
-    if modulate_canvas is not None:
-        under.multiply(modulate_canvas)
-        over.multiply(modulate_canvas)
-    for n, xf in lights:
-        B.draw_light(under, tc, n, xf)
+
+    def hidden_by(n, hidden):
+        x = n
+        while x is not None:
+            if id(x) in hidden:
+                return True
+            x = x.parent
+        return False
+
+    under, over = _bake(project, tc, draw_items, size, bounds, scale, player_index, modulate_canvas, set(), hidden_by)
+    if lights_hidden:  # the lights-out look
+        cm = None if modulate_node is not None and id(modulate_node) in lights_hidden else modulate_canvas
+        under2, over2 = _bake(project, tc, draw_items, size, bounds, scale, player_index, cm, lights_hidden, hidden_by)
+    else:
+        under2 = over2 = None
     # each switchable layer: its own picture file (<id>_t<group>.t3x; too big for the object atlas),
     # drawn while the layer is on
     os.makedirs(out_dir, exist_ok=True)
@@ -649,6 +657,10 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
     has_over = bool((over.px[..., 3] > 0.004).any())
     if has_over:
         over.image().save(os.path.join(out_dir, out_name + "_o.png"))
+    if under2 is not None:
+        under2.image().convert("RGB").save(os.path.join(out_dir, out_name + "_u2.png"))
+        if has_over:
+            over2.image().save(os.path.join(out_dir, out_name + "_o2.png"))
 
     shade = S.color(p.get("level_shade"))
     lines = ["ucgl 1",
@@ -687,6 +699,38 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
         f.write("\n".join(lines) + "\n")
     return {"id": lid, "bounds": bounds, "shapes": len(shapes), "objects": len(objects), "over": has_over,
             "dyn": dyn_files, "tiles": tile_files}
+
+
+def _bake(project, tc, draw_items, size, bounds, scale, player_index, modulate_canvas, hidden, hidden_by):
+    """The course's flat pictures: under the cat and over it, leaving out what is hidden."""
+    under = B.Canvas(size, -bounds, -bounds, scale)
+    over = B.Canvas(size, -bounds, -bounds, scale)
+    lights = []
+    for n in draw_items:
+        if hidden and hidden_by(n, hidden):
+            continue
+        z = S.global_z(n)
+        target = under if (z < 0 or (z == 0 and n.index < player_index)) else over
+        xf = S.global_xform(n)
+        mod = S.global_modulate(n)
+        if n.type == "Sprite2D":
+            B.draw_sprite(target, tc, n, xf, n.get("texture"), mod)
+        elif n.type == "AnimatedSprite2D":
+            B.draw_sprite(target, tc, n, xf, B.frame_texture(n), mod)
+        elif n.type == "Polygon2D":
+            B.draw_polygon(target, tc, n, xf, mod)
+        elif n.type == "TileMapLayer":
+            B.draw_tilemap(target, tc, project, n, xf, mod)
+        elif n.type == "PointLight2D":
+            lights.append((n, xf))
+        elif n.type == "NinePatchRect":
+            B.draw_ninepatch(target, tc, n, S.global_xform(n.parent), mod)
+    if modulate_canvas is not None:
+        under.multiply(modulate_canvas)
+        over.multiply(modulate_canvas)
+    for n, xf in lights:
+        B.draw_light(under, tc, n, xf)
+    return under, over
 
 
 def _dyn_sprite(dyn, pic):

@@ -1,0 +1,14 @@
+{
+  "_idea": "Uncanny: Canny next to its uncanny double on a green, a short quiet sting",
+  "background": [86, 170, 74],
+  "layers": [
+    {"image": "graphics/HUD/logo_small/logo_small_en.png", "x": 128, "y": 18, "width": 210},
+    {"image": "graphics/player/costume_canny.png", "x": 82, "y": 80, "width": 78},
+    {"image": "graphics/player/costume_uncanny.png", "x": 174, "y": 80, "width": 78, "flip": true}
+  ],
+  "sounds": [
+    {"file": "sounds/player/grab.ogg", "at": 0.0, "gain": 0.9},
+    {"file": "sounds/ghost/defaultJumpscare.ogg", "at": 0.7, "to": 1.4, "gain": 0.3}
+  ],
+  "length": 2.0
+}

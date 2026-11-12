@@ -4,7 +4,8 @@
 #   ./build.sh 3ds [make args]                      build UncannyCatGolf.3dsx (and `cia`)
 #       LEAN=1 ./build.sh 3ds                       the release kind: only romfs/port/ inside, the game's
 #                                                   files come from sdmc:/3ds/Uncanny Cat Golf/
-#   ./build.sh sdcard                               make that folder: $WORK/sdcard/Uncanny Cat Golf/
+#   ./build.sh banner                               make Banner1..3 (banner.png + banner.wav) from banner.json
+#   ./build.sh sdcard                             make that folder: $WORK/sdcard/Uncanny Cat Golf/
 #   ./build.sh sim                                  build and run the PC physics check
 #   ./build.sh gimtest <world> [level]              try shots at each gimmick on the PC
 # SOURCE points at the unpacked "Uncanny Cat Golf (source)" folder.
@@ -38,6 +39,12 @@ case "$cmd" in
     nice -n 10 make -j3 "$@"
     for f in UncannyCatGolf.3dsx UncannyCatGolf.cia; do [ -f "$f" ] && cp "$f" "$WORK/"; done
     ls -la "$WORK"/*.3dsx "$WORK"/*.cia 2>/dev/null || true
+    ;;
+  banner)
+    # Banner1..3/banner.png + banner.wav from their banner.json, in the repo (to look at and listen to,
+    # git ignores them) and here for `make cia BANNER=n`
+    python3 -I tools/convert/banner.py --source "$SOURCE" "$REPO"/Banner1 "$REPO"/Banner2 "$REPO"/Banner3
+    for n in 1 2 3; do cp "$REPO/Banner$n/banner.png" "$REPO/Banner$n/banner.wav" "Banner$n/"; done
     ;;
   sdcard)
     # the game's converted files, for sdmc:/3ds/Uncanny Cat Golf/ (everything but the port's own)

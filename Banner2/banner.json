@@ -1,0 +1,14 @@
+{
+  "_idea": "Title: the title screen look, logo big, Canny peeking in",
+  "background": {"image": "graphics/menu/title_bg_grid.png", "tile": false},
+  "layers": [
+    {"image": "graphics/menu/title_bg_hills2.png", "x": 128, "y": 108, "width": 256},
+    {"image": "graphics/HUD/logo/logo_en.png", "x": 118, "y": 58, "width": 190},
+    {"image": "graphics/player/costume_canny.png", "x": 228, "y": 104, "width": 64, "rotate": 18}
+  ],
+  "sounds": [
+    {"file": "sounds/menu/title_hit.ogg", "at": 0.0, "gain": 0.8},
+    {"file": "sounds/menu/title_cheer.ogg", "at": 0.35, "to": 2.5, "gain": 0.6}
+  ],
+  "length": 2.9
+}

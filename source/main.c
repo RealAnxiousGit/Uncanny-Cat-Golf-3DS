@@ -276,6 +276,8 @@ static Game game;
 static LevelDef level;
 static bool level_loaded;
 static C2D_SpriteSheet floor_u, floor_o, dyn_sheet;
+static C2D_SpriteSheet floor_u2, floor_o2, ashbaby_sheet; // lights-out pictures, 3-10's Ash Baby
+static int ashbaby_a; // ash_baby_event.gd: jumpscare.modulate.a8, 254 falling by 2 a frame
 static GameSettings gset;
 static int jumpscare_t, results_t, win_t;
 static int results_stage; // 0 sliding in, 1 counting, 2 rank shown
@@ -333,6 +335,11 @@ static void unload_level(void) {
     if (floor_o) C2D_SpriteSheetFree(floor_o);
     if (dyn_sheet) C2D_SpriteSheetFree(dyn_sheet);
     floor_u = floor_o = dyn_sheet = NULL;
+    if (floor_u2) C2D_SpriteSheetFree(floor_u2);
+    if (floor_o2) C2D_SpriteSheetFree(floor_o2);
+    if (ashbaby_sheet) C2D_SpriteSheetFree(ashbaby_sheet);
+    floor_u2 = floor_o2 = ashbaby_sheet = NULL;
+    ashbaby_a = 0;
     for (int t = 0; t < MAX_TILES; t++) {
         if (tile_sheet[t]) C2D_SpriteSheetFree(tile_sheet[t]);
         tile_sheet[t] = NULL;
@@ -376,6 +383,17 @@ static bool start_level_(int w, int l) {
     if (level.ndspr > 0) { // pictures of the blocks, doors, keys and skulls
         snprintf(path, sizeof(path), "%s/levels/w%d/%s_d.t3x", data_root(), w, wnames[w][l]);
         dyn_sheet = sheet_load(path);
+    }
+    for (int i = 0; i < level.nobjs; i++) {
+        if (level.objs[i].type == OBJ_LIGHTS && !floor_u2) {
+            snprintf(path, sizeof(path), "%s/levels/w%d/%s_u2.t3x", data_root(), w, wnames[w][l]);
+            floor_u2 = sheet_load(path);
+            if (level.has_over) {
+                snprintf(path, sizeof(path), "%s/levels/w%d/%s_o2.t3x", data_root(), w, wnames[w][l]);
+                floor_o2 = sheet_load(path);
+            }
+        }
+        if (level.objs[i].type == OBJ_ASHBABY && !ashbaby_sheet) ashbaby_sheet = sheet_load(dp("gfx/ashbaby.t3x"));
     }
     for (int i = 0, t = 0; i < level.nobjs && t < MAX_TILES; i++) {
         const ObjDef *o = &level.objs[i];
@@ -490,6 +508,11 @@ static void draw_fade(float w) {
 
 // ---------------------------------------------------------------- sounds and thoughts
 static void play_events(uint64_t ev) {
+    if (ev & EV_LIGHTS) sfx_play("gimmicks/dog_goal.ogg", 1, 1); // both lights-out levels use this sound
+    if ((ev & EV_ASHBABY) && set.jumpscares != 2) {
+        ashbaby_a = 254;
+        if (set.jumpscares == 0) sfx_play("gimmicks/ash_baby_jumpscare.ogg", 1, 1);
+    }
     if (ev & EV_SWITCH) sfx_play("block/switch.ogg", game.switch_pitch, 1);
     if (ev & EV_DOGBUMP) sfx_play("player/wallBump.ogg", 1, 1);
     if (ev & EV_DOGWIN) {
@@ -560,6 +583,7 @@ static void play_thought(int th) {
     case TH_POLICE: thoughts_play("Police"); thoughts_fallback("Police"); break;
     case TH_CHUCKLE: thoughts_play("Chuckle"); break; // baddie.gd do_thought
     case TH_DOG: thoughts_play("Dog"); break;
+    case TH_LIGHTS: thoughts_play("Lights"); break;
     case TH_WIN: thoughts_play("Win"); thoughts_fallback("Win"); break;
     case TH_DEATH: thoughts_play("Death"); thoughts_fallback("Death"); break;
     case TH_BACKROOMS: thoughts_play("Backrooms"); thoughts_fallback("Backrooms"); break;
@@ -715,6 +739,21 @@ static u32 shade_color(float a) {
 }
 
 static u32 grey(float v) { return C2D_Color32f(v, v, v, 1); }
+
+// lights_out_event.gd: modulate = Color.DIM_GRAY on the cat, the uncannies (and the flag, if it says so)
+static u32 lit(bool affected) {
+    float d = game.lights_out && affected ? 105.0f / 255 : 1;
+    return C2D_Color32f(level.shade[0] * d, level.shade[1] * d, level.shade[2] * d, level.shade[3]);
+}
+
+// ash_baby_event.gd: the ASHBABY!!!!! picture over the course, fading out, across both screens
+static void draw_ashbaby(bool top) {
+    if (!ashbaby_sheet || ashbaby_a <= 0) return;
+    C2D_ImageTint t;
+    C2D_PlainImageTint(&t, C2D_Color32(255, 255, 255, ashbaby_a), 0);
+    C2D_DrawImageAt(C2D_SpriteSheetGetImage(ashbaby_sheet, 0), top ? -40 : -80, top ? 0 : -240, 0.98f, &t,
+                    480.0f / 512, 480.0f / 512);
+}
 
 // part (sx, sy, sw, sh in image px) of a picture, stretched over a screen rect
 static void draw_img_part(C2D_Image img, float sx, float sy, float sw, float sh, float dx, float dy, float dw,
@@ -901,8 +940,10 @@ static bool course_under(float x, float y, float w, float h) {
 static void draw_course(void) {
     float k = course_scale();
     C2D_DrawRectSolid(0, 0, 0, BOT_W, SCR_H, C2D_Color32(0, 0, 0, 255));
-    if (floor_u) {
-        C2D_Image img = C2D_SpriteSheetGetImage(floor_u, 0);
+    C2D_SpriteSheet fu = game.lights_out && floor_u2 ? floor_u2 : floor_u;
+    C2D_SpriteSheet fo = game.lights_out && floor_u2 ? floor_o2 : floor_o;
+    if (fu) {
+        C2D_Image img = C2D_SpriteSheetGetImage(fu, 0);
         float cw = 2 * level.bounds * k, s = cw / level.image_size;
         if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.1f, NULL, -s, s);
         else C2D_DrawImageAt(img, course_left(), course_top(), 0.1f, NULL, s, s);
@@ -913,7 +954,7 @@ static void draw_course(void) {
     for (int t = 0; t < game.ntiles; t++)
         if (game.tiles[t].on && !game.tiles[t].over) draw_tiles(t, k);
     ui_z = 0.2f;
-    if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, shade_color(1), 0);
+    if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, lit(game.lights_goal), 0);
     for (int d = 0; d < game.ndoggoals; d++) draw_dyn(game.doggoals[d].spr, game.doggoals[d].pos, k, WHITE);
     ui_z = 0.22f; // jump pads, spawner doors
     for (int i = 0; i < game.npads; i++) draw_dyn(game.pads[i].spr, game.pads[i].pos, k, WHITE);
@@ -959,11 +1000,11 @@ static void draw_course(void) {
     ui_z = game.pstate == PS_JUMP ? 0.72f : 0.4f; // PJump: z_index 1, over everything in the level
     if (game.sprite_visible) {
         float sc = game.sprite_scale / 0.064f;
-        draw_sprite("costume_canny", world_to_screen(game.pos), k, sc, shade_color(1), 0);
+        draw_sprite("costume_canny", world_to_screen(game.pos), k, sc, lit(true), 0);
     }
     ui_z = 0.45f;
     for (int i = 0; i < game.nghosts; i++)
-        if (game.ghosts[i].alive) draw_sprite("costume_uncanny", world_to_screen(game.ghosts[i].pos), k, 1, shade_color(1), 0);
+        if (game.ghosts[i].alive) draw_sprite("costume_uncanny", world_to_screen(game.ghosts[i].pos), k, 1, lit(true), 0);
     if (game.hit_visible && game.pstate == PS_IDLE) {
         float c[4];
         game_aim_color(&game, c);
@@ -977,8 +1018,8 @@ static void draw_course(void) {
     ui_z = 0.69f;
     for (int t = 0; t < game.ntiles; t++)
         if (game.tiles[t].on && game.tiles[t].over) draw_tiles(t, k);
-    if (floor_o) {
-        C2D_Image img = C2D_SpriteSheetGetImage(floor_o, 0);
+    if (fo) {
+        C2D_Image img = C2D_SpriteSheetGetImage(fo, 0);
         float cw = 2 * level.bounds * k, s = cw / level.image_size;
         if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.7f, NULL, -s, s);
         else C2D_DrawImageAt(img, course_left(), course_top(), 0.7f, NULL, s, s);
@@ -1813,7 +1854,7 @@ static const char *const PRELOAD[] = {
     "block/keydoor.ogg", "enemy/skullDeath.ogg", "collectibles/boost.ogg", "gimmicks/jump_pad.ogg",
     "enemy/carDeath.ogg", "enemy/carHorn1.ogg", "enemy/carHorn2.ogg", "gimmicks/policesiren.ogg",
     "gimmicks/spotlight.ogg", "block/switch.ogg", "gimmicks/dog_goal.ogg", "gimmicks/dog.ogg",
-    "enemy/chuckleDeath.ogg", "collectibles/smileyring.ogg", "collectibles/smileycoin.ogg",
+    "enemy/chuckleDeath.ogg", "gimmicks/ash_baby_jumpscare.ogg", "collectibles/smileyring.ogg", "collectibles/smileycoin.ogg",
     "collectibles/smileyWin.ogg", "collectibles/smileyFail.ogg", "collectibles/smileytimer.ogg", "gimmicks/slots_jackpot.ogg", "gimmicks/wow.ogg", "gimmicks/slots_fine.ogg",
     "gimmicks/slots_question.ogg", "menu/phone_accept.ogg", "gimmicks/slots_look.ogg", "gimmicks/slots_blue.ogg",
     "gimmicks/slots_bad.ogg", "gimmicks/slots_dead.ogg", "gimmicks/slots_fail.ogg", "ghost/defaultJumpscare.ogg", "game/deathOB.ogg",
@@ -2111,6 +2152,7 @@ int main(void) {
                 sfx_play("player/grab.ogg", 1, 1);
             }
             if (jumpscare_t > 0) jumpscare_t--;
+            if (ashbaby_a > 0) ashbaby_a -= 2;
         }
 
         PROF_MARK("logic");
@@ -2145,6 +2187,7 @@ int main(void) {
         else draw_top_hud();
         ui_z = 0.99f;
         if (jumpscare_t > 0) draw_jumpscare(true);
+        draw_ashbaby(true);
         draw_fade(TOP_W);
 
         C2D_SceneBegin(bot);
@@ -2176,6 +2219,7 @@ int main(void) {
             }
             ui_z = 0.99f;
             if (jumpscare_t > 0) draw_jumpscare(false);
+            draw_ashbaby(false);
         }
         if (set.show_fps) {
             fps_count++;

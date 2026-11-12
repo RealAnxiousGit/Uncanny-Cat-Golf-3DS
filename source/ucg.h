@@ -45,7 +45,7 @@ typedef struct {
 enum {
     OBJ_PLAYER, OBJ_GOAL, OBJ_GHOST, OBJ_COIN, OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_KEY, OBJ_SKULL,
     OBJ_TOKEN, OBJ_JUMPPAD, OBJ_SPAWNER, OBJ_CAR, OBJ_POLICE, OBJ_SLOT, OBJ_SLOTMACHINE,
-    OBJ_SWITCH, OBJ_DOG, OBJ_DOGGOAL, OBJ_RING, OBJ_SCOIN, OBJ_TILES, OBJ_COUNT
+    OBJ_SWITCH, OBJ_DOG, OBJ_DOGGOAL, OBJ_RING, OBJ_SCOIN, OBJ_TILES, OBJ_LIGHTS, OBJ_ASHBABY, OBJ_COUNT
 };
 
 #define MAX_PARAMS 24
@@ -60,7 +60,7 @@ typedef struct {
 } ObjDef;
 
 // Area zones (outline only; their art is in the floor picture)
-enum { ZONE_SAND = 1, ZONE_WATER = 2, ZONE_POLICE = 3 };
+enum { ZONE_SAND = 1, ZONE_WATER = 2, ZONE_POLICE = 3, ZONE_LIGHTS = 4, ZONE_ASHBABY = 5 };
 
 // Pictures of dynamic objects in <id>_d.t3x
 typedef struct { int w, h; float ax, ay; } DynSprite;

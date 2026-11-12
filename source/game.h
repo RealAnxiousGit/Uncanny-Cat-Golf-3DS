@@ -49,10 +49,12 @@ enum {
 #define EV_SCOIN (1ull << 31)
 #define EV_RINGWIN (1ull << 32)
 #define EV_RINGFAIL (1ull << 33)
+#define EV_LIGHTS (1ull << 34)
+#define EV_ASHBABY (1ull << 35)
 
 // Thought animations the top screen should show (thought_displayer categories)
 enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL, TH_CAR, TH_JUMP, TH_POLICE,
-       TH_CHUCKLE, TH_DOG };
+       TH_CHUCKLE, TH_DOG, TH_LIGHTS };
 
 typedef struct {
     // positions are in the original's viewport pixels: the course is 0..512 on both axes
@@ -192,6 +194,9 @@ typedef struct {
     int nscoins;
     struct { vec2 pos; float r; int ring, spr, count; bool active; float popup; } scoins[MAX_SCOINS];
     float scoin_pitch;
+    // lights_out_event.gd / ash_baby_event.gd (CustomEvent areas: once each)
+    bool lights_out, lights_done, lights_goal, ash_done;
+    int lights_score, ash_score;
     int moving_type;          // PMoving.enter(type): 1 keeps the coin multiplier
     int nbodies;
     Body bodies[MAX_BODIES];

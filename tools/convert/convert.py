@@ -116,7 +116,7 @@ def convert_levels(project, tc, out, worlds, report):
             name = f[:-5]
             t = time.time()
             info = L.convert_level(project, tc, "%s/%s" % (wdir, f), out_dir, name, report)
-            for suffix, fmt in (("_u", "rgb565"), ("_o", "rgba8")):
+            for suffix, fmt in (("_u", "rgb565"), ("_o", "rgba8"), ("_u2", "rgb565"), ("_o2", "rgba8")):
                 png = os.path.join(out_dir, name + suffix + ".png")
                 if os.path.exists(png):
                     tex3ds([png], os.path.join(out_dir, name + suffix + ".t3x"), fmt, z="lz11")
@@ -289,6 +289,10 @@ def convert_menu(project, out):
     js = os.path.join(tmp, "jumpscare.png")
     Image.open(project.fs(g.path)).convert("RGB").resize((512, 512), Image.LANCZOS).save(js)
     tex3ds([js], os.path.join(gfx, "jumpscare.t3x"), "rgb565")
+    # ash_baby_event.gd: 3-10's ASHBABY!!!!! sprite (512x512), drawn across both screens like the jumpscare
+    ab = os.path.join(tmp, "ashbaby.png")
+    Image.open(project.fs("res://assetsNEW/graphics/gimmicks/ashbabyjumpscare.png")).convert("RGB").save(ab)
+    tex3ds([ab], os.path.join(gfx, "ashbaby.t3x"), "rgb565")
     files, lines = [], []
     for i, (name, img, anchor) in enumerate(HUD.menu_entries(project)):
         p = os.path.join(tmp, "%02d_%s.png" % (i, name))

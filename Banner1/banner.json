@@ -1,0 +1,16 @@
+{
+  "_idea": "Swing: Canny mid-launch with an aim line toward the hole, logo on top",
+  "background": {"image": "graphics/menu/menu_bg.png", "tile": true, "scale": 0.5},
+  "layers": [
+    {"image": "graphics/HUD/logo_small/logo_small_en.png", "x": 128, "y": 20, "width": 220},
+    {"line": [62, 92, 196, 62], "color": [255, 255, 255, 230], "width": 3},
+    {"image": "graphics/gimmicks/goal_face.png", "region": [0, 0, 64, 64], "x": 206, "y": 86, "width": 46},
+    {"image": "graphics/player/costume_canny.png", "x": 58, "y": 90, "width": 66, "rotate": -12}
+  ],
+  "sounds": [
+    {"file": "sounds/player/phwing.ogg", "at": 0.0, "to": 0.7, "gain": 0.9},
+    {"file": "sounds/player/wallBump.ogg", "at": 0.55, "gain": 0.8},
+    {"file": "sounds/game/levelWin.ogg", "at": 0.9, "to": 1.95, "gain": 0.55}
+  ],
+  "length": 2.9
+}

@@ -531,6 +531,13 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
         case OBJ_POLICE:
             g->police = o;
             break;
+        case OBJ_LIGHTS:
+            g->lights_score = (int)obj_param(o, "score_value", 0);
+            g->lights_goal = obj_param(o, "goal", 0) != 0;
+            break;
+        case OBJ_ASHBABY:
+            g->ash_score = (int)obj_param(o, "score_value", 0);
+            break;
         case OBJ_TILES:
             if (g->ntiles < MAX_TILES) {
                 __typeof__(g->tiles[0]) *t = &g->tiles[g->ntiles++];
@@ -1063,6 +1070,19 @@ static void areas_tick(Game *g) {
                 g->events |= EV_SPLASH;
                 death(g, DEATH_WATER);
                 return;
+            }
+        } else if (s->layers == ZONE_LIGHTS) {
+            if (entered && !g->lights_done) { // the course goes dark, the cats go grey
+                g->lights_done = g->lights_out = true;
+                g->level_bonus += g->lights_score;
+                g->events |= EV_LIGHTS;
+                g->thought = TH_LIGHTS;
+            }
+        } else if (s->layers == ZONE_ASHBABY) {
+            if (entered && !g->ash_done) {
+                g->ash_done = true;
+                g->level_bonus += g->ash_score;
+                if (g->mode == MODE_NORMAL) g->events |= EV_ASHBABY; // not in demos (level.mode NORMAL only)
             }
         } else if (s->layers == ZONE_POLICE) {
             if (entered && g->police && !g->police_done) police_event(g);
