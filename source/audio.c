@@ -11,7 +11,7 @@
 
 #define SFX_CHANNELS 7      // ndsp channels 1..7; channel 0 is music
 #define MAX_SFX 160
-#define MUSIC_BUFS 3
+#define MUSIC_BUFS 4
 #define MUSIC_BUF_SAMPLES 4096
 
 typedef struct {
@@ -40,9 +40,14 @@ static const Track *cur_track;
 static ndspWaveBuf mbuf[MUSIC_BUFS];
 static int16_t *mdata[MUSIC_BUFS];
 
-// The worker thread (audio_bg_step) streams the music and decodes queued sounds, so neither
-// costs the game a frame. alock guards the music decoder and the sound table.
-static LightLock alock;
+// Music has a thread of its own (music_thread): higher priority than the game, woken by the DSP after
+// every audio frame, so a long sound decode or file read on the worker can never starve it (that was
+// the stutter on real hardware, e.g. in the intro while every sound is decoded). mlock guards the music
+// decoder. The worker (audio_bg_step) decodes queued sounds; alock guards the sound table.
+static LightLock alock, mlock;
+static Thread mthread;
+static LightEvent mev;
+static volatile bool mrun;
 #define PRELOAD_Q 64
 static char preload_q[PRELOAD_Q][64];
 static int q_head, q_tail;
@@ -63,18 +68,50 @@ static void load_track_index(void) {
     fclose(f);
 }
 
+static bool music_step(void);
+
+// called by ndsp after every audio frame (about 5 ms)
+static void ndsp_frame(void *arg) {
+    (void)arg;
+    LightEvent_Signal(&mev);
+}
+
+static void music_thread(void *arg) {
+    (void)arg;
+    while (mrun) {
+        while (music_step()) {}
+        LightEvent_Wait(&mev);
+    }
+}
+
 bool audio_init(void) {
     if (R_FAILED(ndspInit())) return false;
     ok = true;
     LightLock_Init(&alock);
+    LightLock_Init(&mlock);
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     for (int i = 0; i < MUSIC_BUFS; i++) mdata[i] = linearAlloc(MUSIC_BUF_SAMPLES * 2 * sizeof(int16_t));
     load_track_index();
+    LightEvent_Init(&mev, RESET_ONESHOT);
+    ndspSetCallback(ndsp_frame, NULL);
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    mrun = true;
+    mthread = threadCreate(music_thread, NULL, 32 * 1024, prio - 1, -2, false);
+    if (!mthread) mrun = false;
     return true;
 }
 
 void audio_exit(void) {
     if (!ok) return;
+    if (mthread) {
+        mrun = false;
+        LightEvent_Signal(&mev);
+        threadJoin(mthread, U64_MAX);
+        threadFree(mthread);
+        mthread = NULL;
+    }
+    ndspSetCallback(NULL, NULL);
     if (music_open) ov_clear(&mvf);
     ndspExit();
     for (int i = 0; i < nsfx; i++) linearFree(sfx[i].pcm);
@@ -266,12 +303,12 @@ static void music_fill(ndspWaveBuf *wb, int16_t *data) {
 
 void music_play(int id) {
     if (!ok) return;
-    LightLock_Lock(&alock);
+    LightLock_Lock(&mlock);
     const Track *t = NULL;
     for (int i = 0; i < ntracks; i++)
         if (tracks[i].id == id) t = &tracks[i];
     if (t && t == cur_track && music_open) {
-        LightLock_Unlock(&alock);
+        LightLock_Unlock(&mlock);
         return;
     }
     ndspChnWaveBufClear(0);
@@ -281,19 +318,19 @@ void music_play(int id) {
     }
     cur_track = NULL;
     if (!t) {
-        LightLock_Unlock(&alock);
+        LightLock_Unlock(&mlock);
         return;
     }
     char path[160];
     snprintf(path, sizeof(path), "%s/music/%s", data_root(), t->file);
     FILE *f = fopen(path, "rb");
     if (!f) {
-        LightLock_Unlock(&alock);
+        LightLock_Unlock(&mlock);
         return;
     }
     if (ov_open(f, &mvf, NULL, 0) < 0) {
         fclose(f);
-        LightLock_Unlock(&alock);
+        LightLock_Unlock(&mlock);
         return;
     }
     vorbis_info *vi = ov_info(&mvf, -1);
@@ -306,19 +343,20 @@ void music_play(int id) {
     ndspChnSetRate(0, music_rate);
     ndspChnSetFormat(0, music_channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
     audio_set_volumes(vol_master, vol_music, vol_sound);
-    // the worker fills the buffers; without one, the first fill happens here
+    // the music thread fills the buffers; without one, the first fill happens here
     for (int i = 0; i < MUSIC_BUFS; i++) {
         memset(&mbuf[i], 0, sizeof(mbuf[i]));
         mbuf[i].status = NDSP_WBUF_DONE;
     }
-    if (!bg_on)
+    if (!mthread)
         for (int i = 0; i < MUSIC_BUFS; i++) music_fill(&mbuf[i], mdata[i]);
-    LightLock_Unlock(&alock);
+    LightLock_Unlock(&mlock);
+    if (mthread) LightEvent_Signal(&mev);
 }
 
 static bool music_step(void) {
     bool did = false;
-    LightLock_Lock(&alock);
+    LightLock_Lock(&mlock);
     if (music_open)
         for (int i = 0; i < MUSIC_BUFS; i++)
             if (mbuf[i].status == NDSP_WBUF_DONE) {
@@ -326,12 +364,12 @@ static bool music_step(void) {
                 did = true;
                 break; // one buffer per step keeps the lock short
             }
-    LightLock_Unlock(&alock);
+    LightLock_Unlock(&mlock);
     return did;
 }
 
 void music_update(void) {
-    if (!ok || bg_on) return;
+    if (!ok || mthread) return;
     while (music_step()) {}
 }
 
@@ -339,7 +377,7 @@ void audio_bg_set(bool on) { bg_on = on; }
 
 bool audio_bg_step(void) {
     if (!ok) return false;
-    bool did = music_step();
+    bool did = false;
     char rel[64];
     rel[0] = 0;
     LightLock_Lock(&alock);

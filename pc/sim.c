@@ -31,6 +31,7 @@ static void load_index(const char *romfs) {
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: ucgsim <romfs> [world]\n"); return 2; }
     const char *romfs = argv[1];
+    const char *trace = getenv("TRACE"); // a demo name: print its frames
     int only = argc > 3 ? atoi(argv[3]) : -1;
     load_index(romfs);
     char path[512], line[4096];
@@ -65,20 +66,24 @@ int main(int argc, char **argv) {
         GameInput in;
         memset(&in, 0, sizeof(in));
         int frames = 0, bumps = 0;
-        int limit = dt > 0 ? dt * 3 : 3000;
+        int limit = dt > 0 ? dt + 1 : 3000; // attract_demo.gd switches level once demo_timer > demo_time
         while (frames < limit && !g.victory && !g.lose) {
             game_tick(&g, &in);
             if (g.events & EV_BUMP) bumps++;
+            if (trace && !strcmp(trace, name) && (frames % 8 == 0 || (g.events & (EV_BUMP | EV_LAUNCH))))
+                printf("  f%4d st%d pos (%7.2f,%7.2f) vel (%8.2f,%8.2f)%s%s ghost (%.1f,%.1f)\n", frames, g.pstate,
+                       g.pos.x, g.pos.y, g.vel.x, g.vel.y, (g.events & EV_BUMP) ? " BUMP" : "",
+                       (g.events & EV_LAUNCH) ? " LAUNCH" : "", g.ghosts[0].pos.x, g.ghosts[0].pos.y);
             frames++;
         }
         checked++;
-        const char *how = g.victory ? "WIN" : g.lose ? DEATHS[g.death_type] : "still rolling";
-        if (g.victory) wins++;
+        const char *how = g.victory ? "WIN" : g.lose ? DEATHS[g.death_type] : "cut off (ok)";
+        if (g.victory || (!g.lose && frames >= limit)) wins++;
         printf("%-18s %s %-3s  %-16s shots %d/%d  frames %4d (demo_time %d)  bumps %d  end (%.1f, %.1f)\n",
                name, lv.id, "", how, g.strokes, g.ndemo, frames, dt, bumps, g.pos.x, g.pos.y);
         level_free(&lv);
     }
     fclose(f);
-    printf("\n%d demos replayed, %d reached the hole\n", checked, wins);
+    printf("\n%d demos replayed, %d end as in the game (in the hole, or still playing when the demo switches)\n", checked, wins);
     return 0;
 }

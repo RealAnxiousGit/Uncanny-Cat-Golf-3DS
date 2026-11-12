@@ -5,7 +5,8 @@
 
 #include "ucg.h"
 
-static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "dblock", "keydoor", "key", "skull"};
+static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "dblock", "keydoor", "key", "skull",
+                                               "token", "jumppad", "spawner", "car", "police"};
 
 void shape_update_bbox(Shape *s) {
     if (s->kind == SHAPE_CIRCLE) {
@@ -122,7 +123,8 @@ bool level_load(LevelDef *lv, const char *path) {
             Shape z;
             memset(&z, 0, sizeof(z));
             z.kind = SHAPE_POLY;
-            z.layers = !strcmp(kind, "sand") ? ZONE_SAND : !strcmp(kind, "water") ? ZONE_WATER : 0;
+            z.layers = !strcmp(kind, "sand") ? ZONE_SAND : !strcmp(kind, "water") ? ZONE_WATER
+                     : !strcmp(kind, "police") ? ZONE_POLICE : 0;
             z.n = (int)strtol(p, &p, 10);
             if (!z.layers || z.n < 3) continue;
             z.pts = malloc(z.n * sizeof(vec2));

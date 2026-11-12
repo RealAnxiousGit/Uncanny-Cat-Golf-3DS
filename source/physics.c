@@ -160,14 +160,18 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
                 best = i;
                 break;
             }
-            float lo = 0, hi = 1;
+            // godot_space_2d.cpp: an overlap test at each step, splitting 0.25/0.75 instead of in half
+            // once it keeps landing on the same side
+            float lo = 0, hi = 1, coeff = 0.5f;
             for (int k = 0; k < CAST_STEPS; k++) {
-                float f = (lo + hi) * 0.5f;
-                if (separation(s, v2add(p, v2mul(motion, f)), r, NULL) < 0 ||
-                    sweep_hits(s, p, v2add(p, v2mul(motion, f)), r))
+                float f = lo + (hi - lo) * coeff;
+                if (separation(s, v2add(p, v2mul(motion, f)), r, NULL) < 0) {
                     hi = f;
-                else
+                    coeff = (k == 0 || lo > 0) ? 0.5f : 0.25f;
+                } else {
                     lo = f;
+                    coeff = (k == 0 || hi < 1) ? 0.5f : 0.75f;
+                }
             }
             if (lo < safe) {
                 safe = lo;
@@ -202,6 +206,13 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
     } else {
         p = v2add(p, motion);
     }
+    // CharacterBody2D.move_and_collide (cancel_sliding): a push-out smaller than the safe margin that
+    // is sideways to the motion is dropped, so the body only moves along its motion
+    vec2 travel = v2sub(p, *pos);
+    float ml = v2len(motion);
+    vec2 mn = ml > 1e-5f ? v2mul(motion, 1.0f / ml) : v2(0, 0);
+    float along = v2dot(travel, mn);
+    if (v2len(v2sub(travel, v2mul(mn, along))) < SAFE_MARGIN + 0.001f) p = v2add(*pos, v2mul(mn, along));
     *pos = p;
     return col;
 }

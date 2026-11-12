@@ -24,11 +24,23 @@ DYNAMIC = {
     "key_door.tscn": "keydoor",
     "key.tscn": "key",
     "skull.tscn": "skull",
+    # World 2
+    "speed_token.tscn": "token",
+    "stop_token.tscn": "token",
+    "jump_pad.tscn": "jumppad",
+    "baddie_spawner.tscn": "spawner",
+    "car.tscn": "car",
 }
+CAR_SCENE = "res://assetsNEW/scenes/objects/baddies/car.tscn"
+SPAWNER_SCENE = "res://assetsNEW/scenes/objects/baddies/baddie_spawner.tscn"
+SKULL_SCENE = "res://assetsNEW/scenes/objects/baddies/skull.tscn"
 # Areas whose art stays baked into the floor; only their outline goes to the game code.
 ZONES = {"sand_pit.tscn": "sand", "water_death.tscn": "water"}
 # Objects drawn at runtime from their own baked picture (<id>_d.t3x)
-PICTURED = {"dblock", "keydoor", "key", "skull"}
+PICTURED = {"dblock", "keydoor", "key", "skull", "token", "jumppad", "spawner", "car"}
+# the node that gets graphic.modulate = level.level_shade in each object's _ready()
+SHADED = {"skull": "AnimatedSprite2D", "car": "Sprite2D", "token": "AnimatedSprite2D", "spawner": "Door",
+          "jumppad": "Sprite2D"}
 DYN_PX = 1.0  # pixels per world unit in the object pictures
 DYN_SKIP = {"ScorePopup", "ColorblindLabel", "editor_sprite", "lock"}
 SKIP_SCENES = {"level_hud.tscn"}
@@ -76,6 +88,34 @@ def _kind_params(kind, n):
         col = S.color(n.get("modulate"))
         out += ["color_r=%s" % _fmt(col[0]), "color_g=%s" % _fmt(col[1]), "color_b=%s" % _fmt(col[2]),
                 "score_value=%s" % _fmt(int(n.get("score_value", 0) or 0))]
+    if kind == "token":  # collectible.gd with does_speed
+        out += ["score_value=%s" % _fmt(int(n.get("score_value", 0) or 0)),
+                "does_speed=%d" % (1 if n.get("does_speed") else 0),
+                "set_speed=%s" % _fmt(float(n.get("set_speed", 0) or 0)),
+                "coin_multiply=%d" % (1 if n.get("coin_multiply") else 0),
+                "coin_multiply_value=%s" % _fmt(int(n.get("coin_multiply_value", 0) or 0)),
+                "radius=%s" % _fmt(_circle_radius(n, 16.0))]
+    if kind == "jumppad":  # jump_pad.gd
+        out += ["direction=%s" % _fmt(float(n.get("direction", 0) or 0)),
+                "speed_granted=%s" % _fmt(float(n.get("speed_granted", 0) or 0)),
+                "radius=%s" % _fmt(_circle_radius(n, 16.0))]
+    if kind == "spawner":  # baddie_spawner.gd
+        d = S.vec(n.get("b_direction"))
+        ets = n.get("enemy_to_spawn")
+        enemy = "skull" if ets is not None and "skull" in str(getattr(ets, "path", ets)) else "car"
+        out += ["enemy=%d" % (1 if enemy == "skull" else 0),
+                "spawn_rate=%d" % int(n.get("spawn_rate", 0) or 0),
+                "spawn_countdown=%d" % int(n.get("spawn_countdown", 0) or 0),
+                "max_baddies=%d" % int(n.get("max_baddies", 0) or 0),
+                "dir_x=%s" % _fmt(d[0]), "dir_y=%s" % _fmt(d[1]),
+                "speed=%s" % _fmt(float(n.get("b_speed", 0) or 0)),
+                "score_value=%s" % _fmt(int(n.get("b_score_value", 0) or 0)),
+                "rotate=%s" % _fmt(float(n.get("b_rotate", 0) or 0)),
+                "ignorey=%d" % (1 if n.get("b_ignorey_caronly") else 0)]
+    if kind == "car":  # baddie.gd
+        d = S.vec(n.get("direction"))
+        out += ["speed=%s" % _fmt(float(n.get("speed", 0) or 0)), "dir_x=%s" % _fmt(d[0]), "dir_y=%s" % _fmt(d[1]),
+                "score_value=%s" % _fmt(int(n.get("score_value", 0) or 0))]
     if kind == "skull":
         d = S.vec(n.get("direction"))
         out += ["speed=%s" % _fmt(float(n.get("speed", 0) or 0)), "dir_x=%s" % _fmt(d[0]), "dir_y=%s" % _fmt(d[1]),
@@ -83,6 +123,38 @@ def _kind_params(kind, n):
         pr = S.vec(n.get("death_sound_pitch"), (1.0, 1.0))
         out += ["pitch_lo=%s" % _fmt(pr[0]), "pitch_hi=%s" % _fmt(pr[1])]
     return out
+
+
+def _circle_radius(n, default):
+    """Radius of an Area2D's CircleShape2D, in the object's own units (the root's scale is applied later)."""
+    for c in n.children:
+        if c.type == "CollisionShape2D":
+            sh = c.get("shape")
+            if isinstance(sh, Sub) and sh.type == "CircleShape2D":
+                return float(sh.get("radius", default)) * abs(S.vec(c.get("scale"), (1.0, 1.0))[0])
+    return default
+
+
+def _prepare_object(kind, root, rotate_deg=None):
+    """What each object's _ready() changes on its looks before the first frame."""
+    if kind == "jumppad":  # jump_pad.gd: the arrow points along direction; frame 1 when it sets a speed
+        arrow = root.child("arrow")
+        if arrow is not None:
+            arrow.props["rotation"] = float(root.get("direction", 0) or 0) + 0.5 * math.pi
+            if float(root.get("speed_granted", 0) or 0) > 20.0:  # Player.STOP_SPEED
+                arrow.props["frame"] = 1
+    if kind in ("car", "skull"):  # baddie.gd: graphic.rotation_degrees = rotate
+        deg = rotate_deg if rotate_deg is not None else float(root.get("rotate", 0) or 0)
+        g = root.child("Sprite2D") or root.child("AnimatedSprite2D")
+        if g is not None and deg:
+            g.props["rotation"] = math.radians(deg)
+
+
+def render_spawned(project, tc, kind, rotate_deg, level_shade):
+    """Picture of the car or skull a spawner makes (its scene, turned by b_rotate)."""
+    root = S.instantiate(project, SKULL_SCENE if kind == "skull" else CAR_SCENE)
+    _prepare_object(kind, root, rotate_deg)
+    return _render_object(project, tc, root, kind, level_shade)
 
 
 def _render_object(project, tc, root, kind, level_shade):
@@ -109,7 +181,7 @@ def _render_object(project, tc, root, kind, level_shade):
     for n in items:
         xf = S.mul(to_local, S.global_xform(n))
         mod = S.global_modulate(n)
-        if kind == "skull" and n.type == "AnimatedSprite2D":
+        if SHADED.get(kind) == n.name and n.parent is root:
             mod = tuple(a * b for a, b in zip(mod, level_shade))  # graphic.modulate = level_shade
         if n.type == "Sprite2D":
             B.draw_sprite(cv, tc, n, xf, n.get("texture"), mod)
@@ -228,6 +300,35 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
             if base in SKIP_SCENES:
                 dynamic_roots.add(id(n))
                 continue
+            if base == "police_event.tscn":  # police_event.gd: entering the area starts a spawner (or one car)
+                dynamic_roots.add(id(n))
+                for poly in _zone_polys(n):
+                    zones.append(("police", poly))
+                d = S.vec(n.get("b_direction"))
+                ep = S.vec(n.get("e_position"))
+                shade = S.color(p.get("level_shade"))
+                params = ["has_spawner=%d" % (1 if n.get("spawner") is not None else 0),
+                          "score_value=%s" % _fmt(int(n.get("score_value", 0) or 0)),
+                          "spawner_value=%s" % _fmt(int(n.get("spawner_value", 0) or 0)),
+                          "spawn_rate=%d" % int(n.get("spawn_rate", 0) or 0),
+                          "spawn_countdown=%d" % int(n.get("spawn_countdown", 0) or 0),
+                          "max_baddies=%d" % int(n.get("max_baddies", 0) or 0),
+                          "dir_x=%s" % _fmt(d[0]), "dir_y=%s" % _fmt(d[1]),
+                          "speed=%s" % _fmt(float(n.get("b_speed", 0) or 0)),
+                          "b_score_value=%s" % _fmt(int(n.get("b_score_value", 0) or 0)),
+                          "rotate=%s" % _fmt(float(n.get("b_rotate", 0) or 0)),
+                          "e_x=%s" % _fmt(ep[0]), "e_y=%s" % _fmt(ep[1])]
+                ets = n.get("enemy_to_spawn")
+                ek = "skull" if ets is not None and "skull" in str(getattr(ets, "path", ets)) else "car"
+                params.append("enemy=%d" % (1 if ek == "skull" else 0))
+                cp = render_spawned(project, tc, ek, float(n.get("b_rotate", 0) or 0), shade)
+                if cp is not None:
+                    params.append("spr2=%d" % _dyn_sprite(dyn, cp))
+                door = _render_object(project, tc, S.instantiate(project, SPAWNER_SCENE), "spawner", shade)
+                if door is not None:
+                    params.append("spr=%d" % _dyn_sprite(dyn, door))
+                objects.append(("police", (0.0, 0.0), 0.0, 1.0, 1.0, params, True))
+                continue
             zk = ZONES.get(base)
             if zk:
                 for poly in _zone_polys(n):
@@ -245,9 +346,17 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                     player_index = n.index
                 params = _obj_params(n) if kind not in PICTURED else _kind_params(kind, n)
                 if kind in PICTURED:
+                    _prepare_object(kind, n)
                     pic = _render_object(project, tc, n, kind, S.color(p.get("level_shade")))
                     if pic is not None:
                         params.append("spr=%d" % _dyn_sprite(dyn, pic))
+                    if kind == "spawner":  # what it spawns, turned the way it drives
+                        ets = n.get("enemy_to_spawn")
+                        ek = "skull" if ets is not None and "skull" in str(getattr(ets, "path", ets)) else "car"
+                        cp = render_spawned(project, tc, ek, float(n.get("b_rotate", 0) or 0),
+                                            S.color(p.get("level_shade")))
+                        if cp is not None:
+                            params.append("spr2=%d" % _dyn_sprite(dyn, cp))
                     if kind == "keydoor":
                         lk = _render_lock(project, tc, n)
                         if lk is not None:

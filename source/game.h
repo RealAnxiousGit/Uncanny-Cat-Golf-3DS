@@ -19,10 +19,12 @@
 #define LAUNCH_POWER_MAX (MAX_DRAG * DRAG_MULTIPLIER)
 #define PLAYER_RADIUS 15.8f
 #define PLAYER_MASK 9u
+#define JUMP_MASK 65536u  // player.jump_collision_mask: only "Jump Walls" while in the air
+#define JUMP_TIME 26
 #define OB_RADIUS 24
 #define SKIPCOUNT 30
 
-enum { PS_SPAWN, PS_IDLE, PS_MOVING, PS_WIN, PS_LOSE, PS_ATTRACT };
+enum { PS_SPAWN, PS_IDLE, PS_MOVING, PS_WIN, PS_LOSE, PS_ATTRACT, PS_JUMP };
 enum { DEATH_NORMAL, DEATH_OB, DEATH_BACKROOMS, DEATH_WALL, DEATH_HORSE, DEATH_WATER };
 enum { MODE_NORMAL, MODE_ENDLESS, MODE_DEMO };
 enum { RANK_UNCANNY, RANK_ATROCIOUS, RANK_STINKY, RANK_OK, RANK_SWAG, RANK_PEAK };
@@ -36,10 +38,11 @@ enum {
     EV_OB = 1 << 12, EV_PAUSE = 1 << 13, EV_GRAZE = 1 << 14,
     EV_DBLOCK = 1 << 15, EV_KEYDOOR = 1 << 16, EV_KEY = 1 << 17, EV_SKULL = 1 << 18,
     EV_SPLASH = 1 << 19, EV_WATER_DEATH = 1 << 20,
+    EV_BOOST = 1 << 21, EV_JUMP = 1 << 22, EV_CAR = 1 << 23, EV_POLICE = 1 << 24,
 };
 
 // Thought animations the top screen should show (thought_displayer categories)
-enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL };
+enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL, TH_CAR, TH_JUMP, TH_POLICE };
 
 typedef struct {
     // positions are in the original's viewport pixels: the course is 0..512 on both axes
@@ -57,13 +60,17 @@ typedef struct {
 #define MAX_GHOSTS 8
 #define MAX_COINS 64
 #define MAX_DEMO_SHOTS 16
-#define MAX_BODIES 48   // blocks, key doors and skulls (they collide)
+#define MAX_BODIES 64   // blocks, key doors, skulls and cars (they collide)
+#define MAX_PADS 16
+#define MAX_SPAWNERS 16
 #define MAX_KEYS 12
 #define MAX_ZONES 16
 
 // A block, key door or skull: a dynamic physics shape (index lv.nshapes + i)
 typedef struct {
-    int type;          // OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_SKULL
+    int type;          // OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_SKULL, OBJ_CAR
+    int owner;         // the spawner that made it, or -1
+    bool ignorey;      // baddie.ignorey: only leaving sideways despawns it
     bool alive;
     vec2 pos, vel;     // skulls move
     vec2 half;         // block half size
@@ -123,7 +130,16 @@ typedef struct {
     vec2 goal_pos;
     float goal_r;
     int ncoins;
-    struct { vec2 pos; float r; bool taken; int score, mult, multval; float popup; } coins[MAX_COINS];
+    // coins, and World 2's speed / stop tokens (collectible.gd with does_speed; spr >= 0)
+    struct { vec2 pos; float r; bool taken; int score, mult, multval; float popup; bool does_speed; float set_speed; int spr; } coins[MAX_COINS];
+    int npads;    // jump_pad.gd
+    struct { vec2 pos; float r, dir, speed_granted; int spr; bool in; } pads[MAX_PADS];
+    int nspawners; // baddie_spawner.gd
+    struct { vec2 pos, dir; float speed, rotate; int score, rate, countdown, max, count, spr, car_spr; bool skull, ignorey; } spawners[MAX_SPAWNERS];
+    int jump_timer, jump_pad; // PJump.anim_timer; the pad whose player_jump is due (-1 = none)
+    const ObjDef *police;     // police_event.gd settings (the level's "police" object), NULL when none
+    bool police_done;         // the event frees itself after it fires
+    int moving_type;          // PMoving.enter(type): 1 keeps the coin multiplier
     int nbodies;
     Body bodies[MAX_BODIES];
     Shape body_shapes[MAX_BODIES];

@@ -489,6 +489,18 @@ static void play_events(uint32_t ev) {
     if (ev & EV_KEYDOOR) sfx_play("block/keydoor.ogg", 1, 1);
     if (ev & EV_KEY) sfx_play("collectibles/key.ogg", 1, 1);
     if (ev & EV_SKULL) sfx_play("enemy/skullDeath.ogg", game.skull_pitch, 1);
+    if (ev & EV_BOOST) sfx_play("collectibles/boost.ogg", 1, 1);
+    if (ev & EV_JUMP) sfx_play("gimmicks/jump_pad.ogg", 1, 1);
+    if (ev & EV_POLICE) { // 2-11's "police" player: the siren and the spotlight, together
+        sfx_play("gimmicks/policesiren.ogg", 1, 1);
+        sfx_play("gimmicks/spotlight.ogg", 1, 1);
+    }
+    if (ev & EV_CAR) {
+        sfx_play("enemy/carDeath.ogg", 1, 1);
+        // car.tscn horn: AudioStreamRandomizer of two horns, random_pitch 1.2, -10 dB
+        float pitch = powf(1.2f, (rand() / (float)RAND_MAX) * 2 - 1);
+        sfx_play(rand() % 2 ? "enemy/carHorn1.ogg" : "enemy/carHorn2.ogg", pitch, 0.316f);
+    }
     if (ev & EV_SPLASH) {
         static const char *SPLASH[3] = {"player/water_splash1.ogg", "player/water_splash2.ogg", "player/water_splash3.ogg"};
         sfx_play(SPLASH[rand() % 3], 1, 1); // the player's AudioStreamRandomizer
@@ -503,6 +515,9 @@ static void play_thought(int th) {
     case TH_MONEY: thoughts_play("Money"); break;
     case TH_SAND: thoughts_play("Sand"); break;
     case TH_SKULL: thoughts_play("Skull"); break;
+    case TH_CAR: thoughts_play("Car"); break;
+    case TH_JUMP: thoughts_play("Jump"); break;
+    case TH_POLICE: thoughts_play("Police"); thoughts_fallback("Police"); break;
     case TH_WIN: thoughts_play("Win"); thoughts_fallback("Win"); break;
     case TH_DEATH: thoughts_play("Death"); thoughts_fallback("Death"); break;
     case TH_BACKROOMS: thoughts_play("Backrooms"); thoughts_fallback("Backrooms"); break;
@@ -800,29 +815,33 @@ static void popup_text(vec2 world, int score, float popup) {
     text_ol(p.x, p.y - 14 - (1 - popup) * 10, 0.45f, C2D_Color32(255, 255, 120, 255), C2D_AlignCenter, b);
 }
 
-// is a circle (world centre, world radius) over a screen rect?
+// is a circle (world centre, world radius) really over a button? The rect is shrunk to the button's
+// drawn face (its corners are round) and the circle has to reach a few pixels in, so something only
+// passing near the button leaves it solid
 static bool circle_under(vec2 world, float r, float x, float y, float w, float h) {
     vec2 c = world_to_screen(world);
-    float rr = r * course_scale();
+    float rr = r * course_scale() - 3;
+    if (rr <= 0) rr = 1;
+    x += 4, y += 4, w -= 8, h -= 8;
     float nx = fmaxf(x, fminf(c.x, x + w)), ny = fmaxf(y, fminf(c.y, y + h));
     return (c.x - nx) * (c.x - nx) + (c.y - ny) * (c.y - ny) < rr * rr;
 }
 
 // anything that moves or can be picked up, under a button: the cat, ghosts, keys, skulls, coins, the goal
 static bool course_under(float x, float y, float w, float h) {
-    if (game.sprite_visible && circle_under(game.pos, PLAYER_RADIUS * 1.4f * game.sprite_scale / 0.064f, x, y, w, h))
+    if (game.sprite_visible && circle_under(game.pos, PLAYER_RADIUS * game.sprite_scale / 0.064f, x, y, w, h))
         return true;
     for (int i = 0; i < game.nghosts; i++)
-        if (game.ghosts[i].alive && circle_under(game.ghosts[i].pos, PLAYER_RADIUS * 1.6f, x, y, w, h)) return true;
+        if (game.ghosts[i].alive && circle_under(game.ghosts[i].pos, PLAYER_RADIUS, x, y, w, h)) return true;
     for (int i = 0; i < game.nkeys; i++)
-        if (game.keys[i].alive && circle_under(game.keys[i].pos, 18, x, y, w, h)) return true;
+        if (game.keys[i].alive && circle_under(game.keys[i].pos, 14, x, y, w, h)) return true;
     for (int i = 0; i < game.nbodies; i++)
-        if (game.bodies[i].alive && game.bodies[i].type == OBJ_SKULL &&
-            circle_under(game.bodies[i].pos, game.bodies[i].radius + 4, x, y, w, h))
+        if (game.bodies[i].alive && (game.bodies[i].type == OBJ_SKULL || game.bodies[i].type == OBJ_CAR) &&
+            circle_under(game.bodies[i].pos, game.bodies[i].radius, x, y, w, h))
             return true;
     for (int i = 0; i < game.ncoins; i++)
-        if (!game.coins[i].taken && circle_under(game.coins[i].pos, game.coins[i].r + 4, x, y, w, h)) return true;
-    if (game.has_goal && circle_under(game.goal_pos, 20, x, y, w, h)) return true;
+        if (!game.coins[i].taken && circle_under(game.coins[i].pos, game.coins[i].r, x, y, w, h)) return true;
+    if (game.has_goal && circle_under(game.goal_pos, 14, x, y, w, h)) return true;
     return false;
 }
 
@@ -839,9 +858,15 @@ static void draw_course(void) {
     // higher depth in front whatever the drawing order
     ui_z = 0.2f;
     if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, shade_color(1), 0);
+    ui_z = 0.22f; // jump pads, spawner doors
+    for (int i = 0; i < game.npads; i++) draw_dyn(game.pads[i].spr, game.pads[i].pos, k, WHITE);
+    for (int i = 0; i < game.nspawners; i++) draw_dyn(game.spawners[i].spr, game.spawners[i].pos, k, WHITE);
     ui_z = 0.25f;
-    for (int i = 0; i < game.ncoins; i++)
-        if (!game.coins[i].taken) draw_sprite("coin", world_to_screen(game.coins[i].pos), k, 1, shade_color(1), 0);
+    for (int i = 0; i < game.ncoins; i++) {
+        if (game.coins[i].taken) continue;
+        if (game.coins[i].spr >= 0) draw_dyn(game.coins[i].spr, game.coins[i].pos, k, WHITE);
+        else draw_sprite("coin", world_to_screen(game.coins[i].pos), k, 1, shade_color(1), 0);
+    }
     // blocks, doors, keys and skulls: pictures baked by the converter with their
     // rotation, scale and shading, one world unit per pixel
     if (dyn_sheet) {
@@ -859,7 +884,7 @@ static void draw_course(void) {
             if (kk->alive) draw_dyn(kk->spr, kk->pos, k, C2D_Color32f(1, 1, 1, kk->alpha));
         }
     }
-    ui_z = 0.4f;
+    ui_z = game.pstate == PS_JUMP ? 0.72f : 0.4f; // PJump: z_index 1, over everything in the level
     if (game.sprite_visible) {
         float sc = game.sprite_scale / 0.064f;
         draw_sprite("costume_canny", world_to_screen(game.pos), k, sc, shade_color(1), 0);
@@ -1669,7 +1694,9 @@ static const char *const PRELOAD[] = {
     "player/grab.ogg", "player/hit.ogg", "player/wallBump.ogg", "player/push.ogg", "player/cancel.ogg",
     "player/notif.ogg", "player/water_death.ogg", "player/water_splash1.ogg", "player/water_splash2.ogg",
     "player/water_splash3.ogg", "collectibles/coin.ogg", "collectibles/key.ogg", "block/dblock.ogg",
-    "block/keydoor.ogg", "enemy/skullDeath.ogg", "ghost/defaultJumpscare.ogg", "game/deathOB.ogg",
+    "block/keydoor.ogg", "enemy/skullDeath.ogg", "collectibles/boost.ogg", "gimmicks/jump_pad.ogg",
+    "enemy/carDeath.ogg", "enemy/carHorn1.ogg", "enemy/carHorn2.ogg", "gimmicks/policesiren.ogg",
+    "gimmicks/spotlight.ogg", "ghost/defaultJumpscare.ogg", "game/deathOB.ogg",
     "game/levelStart.ogg", "game/levelWin.ogg", "game/resultsDrumroll.ogg", "game/rankAtrocious.ogg",
     "game/rankErm.ogg", "game/rankOK.ogg", "game/rankPeak.ogg", "game/rankSwag.ogg",
     "gimmicks/screamsOfDeadPeople.ogg", "minigame/meowl_die.ogg"};

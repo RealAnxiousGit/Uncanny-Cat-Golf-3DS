@@ -37,6 +37,10 @@ typedef struct {
     int death, frames, keys_held, bodies_alive;
     vec2 end;
     float sand_speed_in, sand_speed_next; // speed on the sand tick and the tick after
+    float boost_speed;                    // speed right after a token
+    float jump_scale;                     // biggest sprite scale while jumping
+    bool jump_landed;                     // back to rolling after the jump
+    int cars_max;                         // most cars on the course at once
 } Run;
 
 static int alive_bodies(const Game *g) {
@@ -72,6 +76,12 @@ static Run play_at(const LevelDef *lv, const DemoShot *shots, int n, const vec2 
             sand_next = true;
         }
         if (g.events & EV_LAUNCH) last_shot_frame = r.frames;
+        if ((g.events & EV_BOOST) && !(r.events & EV_JUMP)) r.boost_speed = sqrtf(v2len2(g.vel));
+        if (g.pstate == PS_JUMP && g.sprite_scale > r.jump_scale) r.jump_scale = g.sprite_scale;
+        if ((r.events & EV_JUMP) && g.pstate == PS_MOVING) r.jump_landed = true;
+        int cars = 0;
+        for (int i = 0; i < g.nbodies; i++) cars += g.bodies[i].alive && (g.bodies[i].type == OBJ_CAR || g.bodies[i].owner >= 0);
+        if (cars > r.cars_max) r.cars_max = cars;
         if (g.strokes >= n && r.frames - last_shot_frame > 30 && g.vel.x == 0 && g.vel.y == 0) break;
     }
     r.lose = g.lose;
@@ -118,8 +128,15 @@ int main(int argc, char **argv) {
             if (lv.zones[i].layers == ZONE_WATER)
                 printf("      water zone %d: kind %d, %d points, box %.0f,%.0f .. %.0f,%.0f\n", i, lv.zones[i].kind,
                        lv.zones[i].n, lv.zones[i].x0, lv.zones[i].y0, lv.zones[i].x1, lv.zones[i].y1);
-        printf("%-5s dblock %d keydoor %d key %d skull %d sand %d water %d\n", lv.id, nobj[OBJ_DBLOCK],
-               nobj[OBJ_KEYDOOR], nobj[OBJ_KEY], nobj[OBJ_SKULL], nsand, nwater);
+        printf("%-5s dblock %d keydoor %d key %d skull %d sand %d water %d token %d jumppad %d spawner %d car %d\n",
+               lv.id, nobj[OBJ_DBLOCK], nobj[OBJ_KEYDOOR], nobj[OBJ_KEY], nobj[OBJ_SKULL], nsand, nwater,
+               nobj[OBJ_TOKEN], nobj[OBJ_JUMPPAD], nobj[OBJ_SPAWNER], nobj[OBJ_CAR]);
+        // spawners with max_baddies 0 (2-17's slot-machine skulls) wait for the jackpot
+        int live_spawners = 0;
+        for (int i = 0; i < lv.nobjs; i++)
+            live_spawners += lv.objs[i].type == OBJ_SPAWNER && obj_param(&lv.objs[i], "max_baddies", 0) > 0;
+        bool want_token = nobj[OBJ_TOKEN], want_pad = nobj[OBJ_JUMPPAD], want_cars = live_spawners || nobj[OBJ_CAR];
+        bool got_token = false, got_pad = false, got_car = false, saw_cars = false;
         bool want_db = nobj[OBJ_DBLOCK], want_door = nobj[OBJ_KEYDOOR] && nobj[OBJ_KEY], want_key = nobj[OBJ_KEY],
              want_skull = nobj[OBJ_SKULL], want_sand = nsand, want_water = nwater;
         bool got_db = false, got_key = false, got_door = false, got_skull = false, got_sand = false, got_water = false;
@@ -131,6 +148,27 @@ int main(int argc, char **argv) {
                 if (want_db && !got_db && (r.events & EV_DBLOCK)) {
                     got_db = true;
                     printf("   dblock : angle %3d power %4.0f -> hit, blocks left %d\n", a, s.power, r.bodies_alive);
+                }
+                if (want_token && !got_token && (r.events & EV_BOOST)) {
+                    got_token = true;
+                    printf("   token  : angle %3d power %4.0f -> speed %.1f after it (speed token 875, stop 0)\n", a,
+                           s.power, r.boost_speed);
+                    if (!(fabsf(r.boost_speed - 875) < 1 || r.boost_speed < 1)) fails++;
+                }
+                if (want_pad && !got_pad && (r.events & EV_JUMP)) {
+                    got_pad = true;
+                    printf("   jump   : angle %3d power %4.0f -> jumped, scale up to %.3f, %s\n", a, s.power,
+                           r.jump_scale, r.jump_landed ? "landed and rolled on" : "NEVER LANDED");
+                    if (!r.jump_landed || r.jump_scale < 0.08f) fails++;
+                }
+                if (want_cars && r.cars_max > 0 && !saw_cars) {
+                    saw_cars = true;
+                    printf("   spawns : up to %d cars/skulls on the course at once\n", r.cars_max);
+                }
+                if (want_cars && !got_car && (r.events & EV_CAR)) {
+                    got_car = true;
+                    printf("   car    : angle %3d power %4.0f -> hit one, %s\n", a, s.power,
+                           r.lose ? "cat died after" : "cat carried on");
                 }
                 if (want_skull && !got_skull && (r.events & EV_SKULL)) {
                     got_skull = true;
@@ -199,6 +237,10 @@ int main(int argc, char **argv) {
         }
 #define MISS(w, g, n) if (w && !g) printf("   %-6s : no shot found\n", n)
         MISS(want_db, got_db, "dblock");
+        MISS(want_token, got_token, "token");
+        MISS(want_pad, got_pad, "jump");
+        MISS(want_cars && nobj[OBJ_CAR] + live_spawners > 0 && got_car == false && saw_cars, got_car, "car");
+        if (want_cars && !saw_cars) printf("   cars   : NONE SPAWNED\n"), fails++;
         MISS(want_skull, got_skull, "skull");
         MISS(want_water, got_water, "water");
         MISS(want_sand, got_sand, "sand");
