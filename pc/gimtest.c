@@ -34,7 +34,7 @@ static void load_index(const char *romfs, int world) {
 typedef struct {
     uint64_t events;
     bool lose, win, sand;
-    int death, frames, keys_held, bodies_alive;
+    int death, frames, keys_held, bodies_alive, doors_alive;
     vec2 end;
     float sand_speed_in, sand_speed_next; // speed on the sand tick and the tick after
     float boost_speed;                    // speed right after a token
@@ -45,7 +45,17 @@ typedef struct {
     int switch_state, groups_on, group_shapes_on; // tile layers at the end
     int scoins;                           // smiley coins taken
     bool dog_moved;
+    // Worlds 4 to 6
+    int portals;                          // teleports in the run (a pair bouncing the cat back and forth is a bug)
+    int baddies_after_nuke;               // skulls / cars still alive right after a nuke (-1: no nuke)
+    float speed_after_fake;               // the cat's speed right after a fake goal
+    float horse_out;                      // furthest the horse got past the course edge
+    bool horse_moved, wind;
+    int horse_hurt;
 } Run;
+
+static int g_prisms;     // GameSettings.total_prisms for the next run
+static int g_min_frames; // a run lasts at least this long (spawners that wait before their first car)
 
 static int alive_bodies(const Game *g) {
     int n = 0;
@@ -60,20 +70,40 @@ static Run play_at(const LevelDef *lv, const DemoShot *shots, int n, const vec2 
     memset(&g, 0, sizeof(g));
     g.ndemo = n;
     memcpy(g.demo, shots, sizeof(DemoShot) * n);
-    GameSettings set = {1.0f, false, true};
+    GameSettings set = {1.0f, false, true, g_prisms, lv->id[0] == 'P'};
     game_start(&g, lv, MODE_DEMO, &set);
     for (int i = 0; i < g.nghosts; i++) g.ghosts[i].alive = false;
     if (start) g.pos = *start;
+    vec2 horse0 = g.horse.pos;
     GameInput in;
     memset(&in, 0, sizeof(in));
     Run r;
     memset(&r, 0, sizeof(r));
+    r.baddies_after_nuke = -1;
+    r.speed_after_fake = -1;
+    r.horse_out = -1e9f;
     int last_shot_frame = 0;
     bool sand_next = false;
-    for (r.frames = 0; r.frames < 3000 && !g.victory && !g.lose; r.frames++) {
+    bool ringing = false; // a started ring gets its whole time (30 s rings start late in a run)
+    for (r.frames = 0; (r.frames < 3000 || (ringing && r.frames < 6000)) && !g.victory && !g.lose; r.frames++) {
         int sc = g.sand_claimer;
+        in.beat = g.nmetros ? r.frames / 30 : 0; // 120 BPM stand-in for the music
         game_tick(&g, &in);
         r.events |= g.events;
+        if (g.events & EV_PORTAL) r.portals++;
+        if (g.events & EV_NUKE) {
+            r.baddies_after_nuke = 0;
+            for (int i = 0; i < g.nbodies; i++)
+                r.baddies_after_nuke += g.bodies[i].alive && (g.bodies[i].type == OBJ_SKULL || g.bodies[i].type == OBJ_CAR);
+        }
+        if (g.events & EV_FAKEGOAL) r.speed_after_fake = v2len(g.vel);
+        if (g.events & EV_HHURT) r.horse_hurt++;
+        if (g.add_vel.x != 0 || g.add_vel.y != 0) r.wind = true;
+        if (g.horse.on && g.horse.mode == HORSE_NORMAL) {
+            float out = fmaxf(fabsf(g.horse.pos.x), fabsf(g.horse.pos.y)) - g.lv.bounds;
+            if (out > r.horse_out) r.horse_out = out;
+            if (v2len2(v2sub(g.horse.pos, horse0)) > 4) r.horse_moved = true;
+        }
         if (sand_next) { r.sand_speed_next = sqrtf(v2len2(g.vel)); sand_next = false; }
         if (sc < 0 && g.sand_claimer >= 0 && !r.sand) {
             r.sand = true;
@@ -95,13 +125,17 @@ static Run play_at(const LevelDef *lv, const DemoShot *shots, int n, const vec2 
         if (g.events & EV_SCOIN) r.scoins++;
         bool ring_busy = false; // let a started ring finish
         for (int i = 0; i < g.nrings; i++) ring_busy |= g.rings[i].running || g.rings[i].after > 0;
-        if (!ring_busy && g.strokes >= n && r.frames - last_shot_frame > 30 && g.vel.x == 0 && g.vel.y == 0) break;
+        ringing = ring_busy;
+        if (!ring_busy && g.strokes >= n && r.frames - last_shot_frame > 30 && g.vel.x == 0 && g.vel.y == 0 &&
+            r.frames >= g_min_frames)
+            break;
     }
     r.lose = g.lose;
     r.win = g.victory;
     r.death = g.death_type;
     r.keys_held = g.nheld;
     r.bodies_alive = alive_bodies(&g);
+    for (int i = 0; i < g.nbodies; i++) r.doors_alive += g.bodies[i].alive && g.bodies[i].type == OBJ_KEYDOOR;
     r.end = g.pos;
     r.switch_state = g.switch_state;
     for (int t = 0; t < g.ntiles; t++) r.groups_on += g.tiles[t].on;
@@ -110,6 +144,7 @@ static Run play_at(const LevelDef *lv, const DemoShot *shots, int n, const vec2 
 }
 
 static Run play(const LevelDef *lv, const DemoShot *shots, int n) { return play_at(lv, shots, n, NULL); }
+#define MISS2(w, g, n) if (w && !g) printf("   %-6s : no shot found\n", n)
 
 static const float POWERS[] = {300, 500, 700, 900, 1200};
 #define NP (int)(sizeof(POWERS) / sizeof(POWERS[0]))
@@ -170,7 +205,24 @@ int main(int argc, char **argv) {
              want_chase = nchasers > 0;
         bool got_switch = false, got_ring = false, got_ringwin = false, got_dogwin = false, got_chase = false,
              got_chuckle = false, dog_moves = false;
-        if (nobj[OBJ_TILES] && !ngroup_shapes) printf("   tiles  : NO SHAPES IN THE GROUPS\n"), fails++;
+        int ntex = 0; // a layer with no tiles at all (4-10's DTiles1) has nothing to collide with
+        for (int i = 0; i < lv.nobjs; i++) ntex += lv.objs[i].type == OBJ_TILES && obj_param(&lv.objs[i], "tex", 0);
+        if (ntex && !ngroup_shapes) printf("   tiles  : NO SHAPES IN THE GROUPS\n"), fails++;
+        // Worlds 4 to 6
+        int nlinked = 0;
+        for (int i = 0; i < lv.nobjs; i++) nlinked += lv.objs[i].type == OBJ_PORTAL && obj_param(&lv.objs[i], "target", -1) >= 0;
+        bool want_portal = nlinked, want_nuke = nobj[OBJ_NUKE], want_fake = nobj[OBJ_FAKEGOAL],
+             want_gate = nobj[OBJ_PRISMGATE], want_horse = nobj[OBJ_HORSE], want_mine = nobj[OBJ_MINE],
+             want_metro = nobj[OBJ_METRONOME], want_wind = false;
+        for (int i = 0; i < lv.ntracks; i++) want_wind |= lv.tracks[i].kind == TRACK_WIND;
+        bool got_portal = false, got_nuke = false, got_fake = false, got_poor = false, got_shatter = false,
+             got_hgoal = false, got_hurt = false, got_mine = false, got_metro = false, got_wind = false;
+        float horse_out = -1e9f;
+        bool horse_moved = false;
+        if (want_portal || want_nuke || want_fake || want_gate || want_horse || want_mine || want_metro || want_wind)
+            printf("      portal %d (linked %d) nuke %d fakegoal %d prismgate %d horse %d hgoal %d mine %d metronome %d"
+                   " tracks %d\n", nobj[OBJ_PORTAL], nlinked, nobj[OBJ_NUKE], nobj[OBJ_FAKEGOAL], nobj[OBJ_PRISMGATE],
+                   nobj[OBJ_HORSE], nobj[OBJ_HGOAL], nobj[OBJ_MINE], nobj[OBJ_METRONOME], lv.ntracks);
         if (nobj[OBJ_SCOIN] && !nobj[OBJ_RING]) printf("   scoin  : NO RING\n"), fails++;
         for (int i = 0; i < lv.nobjs; i++)
             if (lv.objs[i].type == OBJ_SCOIN && obj_param(&lv.objs[i], "ring", -1) < 0)
@@ -215,7 +267,7 @@ int main(int argc, char **argv) {
                     printf("   water  : angle %3d power %4.0f -> splash, %s (death %d, water death event %s)\n", a,
                            s.power, r.lose ? "lost" : "NOT LOST", r.death,
                            (r.events & EV_WATER_DEATH) ? "yes" : "no");
-                    if (!r.lose || r.death != DEATH_WATER) fails++;
+                    if (lv.id[0] == 'P' ? r.lose : (!r.lose || r.death != DEATH_WATER)) fails++; // P levels: swimming
                 }
                 if (want_sand && !got_sand && r.sand) {
                     got_sand = true;
@@ -231,8 +283,9 @@ int main(int argc, char **argv) {
                 if (want_ring && !got_ring && (r.events & EV_RING)) {
                     got_ring = true;
                     printf("   ring   : angle %3d power %4.0f -> started, %d coins taken, %s\n", a, s.power, r.scoins,
-                           (r.events & EV_RINGWIN) ? "passed" : (r.events & EV_RINGFAIL) ? "failed (time)" : "NO RESULT");
-                    if (!(r.events & (EV_RINGWIN | EV_RINGFAIL))) fails++;
+                           (r.events & EV_RINGWIN) ? "passed" : (r.events & EV_RINGFAIL) ? "failed (time)"
+                           : r.lose ? "cat lost before it ran out" : r.win ? "level won first" : "NO RESULT");
+                    if (!(r.events & (EV_RINGWIN | EV_RINGFAIL)) && !r.lose && !r.win) fails++;
                 }
                 if (want_ring && !got_ringwin && (r.events & EV_RINGWIN)) {
                     got_ringwin = true;
@@ -253,17 +306,89 @@ int main(int argc, char **argv) {
                     printf("   chuckle: angle %3d power %4.0f -> killed, %s\n", a, s.power,
                            r.lose ? "cat died after" : "cat carried on");
                 }
+                if (want_horse) {
+                    if (r.horse_out > horse_out) horse_out = r.horse_out;
+                    horse_moved |= r.horse_moved;
+                }
+                if (want_portal && !got_portal && (r.events & EV_PORTAL)) {
+                    got_portal = true;
+                    printf("   portal : angle %3d power %4.0f -> teleported %d time(s), ended at %.0f,%.0f\n", a, s.power,
+                           r.portals, r.end.x, r.end.y);
+                }
+                if (want_portal && r.portals > 20) {
+                    printf("   portal : angle %3d power %4.0f -> %d TELEPORTS IN ONE SHOT\n", a, s.power, r.portals);
+                    fails++, want_portal = false;
+                }
+                if (want_nuke && !got_nuke && (r.events & EV_NUKE)) {
+                    got_nuke = true;
+                    printf("   nuke   : angle %3d power %4.0f -> baddies left right after: %d\n", a, s.power,
+                           r.baddies_after_nuke);
+                    if (r.baddies_after_nuke != 0) fails++;
+                }
+                if (want_fake && !got_fake && (r.events & EV_FAKEGOAL)) {
+                    got_fake = true;
+                    printf("   fake   : angle %3d power %4.0f -> +500, cat speed after %.1f%s\n", a, s.power,
+                           r.speed_after_fake, (r.events & EV_FGHOST) ? ", final ghost woken" : "");
+                    if (r.speed_after_fake > 0.01f) fails++;
+                }
+                if (want_gate && !got_poor && (r.events & EV_TOOPOOR)) {
+                    got_poor = true;
+                    printf("   gate   : angle %3d power %4.0f -> too poor (0 prisms)%s\n", a, s.power,
+                           (r.events & EV_SHATTER) ? " BUT SHATTERED" : "");
+                    if (r.events & EV_SHATTER) fails++;
+                }
+                if (want_horse && !got_hgoal && (r.events & EV_HLAUNCH)) {
+                    got_hgoal = true;
+                    printf("   hgoal  : angle %3d power %4.0f -> launched%s\n", a, s.power,
+                           (r.events & EV_HHURT) ? ", hit the horse" : "");
+                }
+                if (want_horse && !got_hurt && (r.events & EV_HHURT)) {
+                    got_hurt = true;
+                    printf("   horse  : angle %3d power %4.0f -> hurt %d time(s)%s\n", a, s.power, r.horse_hurt,
+                           r.win ? ", LEVEL WON" : "");
+                }
+                if (want_mine && !got_mine && (r.events & EV_MINE)) {
+                    got_mine = true;
+                    printf("   mine   : angle %3d power %4.0f -> boom, %s\n", a, s.power, r.lose ? "cat lost" : "horse hit");
+                }
+                if (want_metro && !got_metro && (r.events & EV_METRO_TRIG)) {
+                    got_metro = true;
+                    printf("   metro  : beats trigger (layers on at the end %d)\n", r.groups_on);
+                }
+                if (want_wind && !got_wind && r.wind) {
+                    got_wind = true;
+                    printf("   wind   : the cat is pushed\n");
+                }
                 if (want_key && !got_key && (r.events & EV_KEY) && !r.lose) {
                     got_key = true;
                     key_shot = s;
                     printf("   key    : angle %3d power %4.0f -> picked up, held %d\n", a, s.power, r.keys_held);
                 }
             }
+        if (want_gate) { // with prisms enough, the gate breaks
+            g_prisms = 100000;
+            for (int p = 0; p < NP && !got_shatter; p++)
+                for (int a = 0; a < 360 && !got_shatter; a += 3) {
+                    DemoShot s = shot(a, p);
+                    Run r = play(&lv, &s, 1);
+                    if (r.events & EV_SHATTER) {
+                        got_shatter = true;
+                        printf("   gate   : angle %3d power %4.0f -> shattered (enough prisms)\n", a, s.power);
+                    }
+                }
+            g_prisms = 0;
+            MISS2(want_gate, got_shatter, "gate (rich)");
+        }
+        if (want_horse) {
+            printf("   horse  : %s, furthest past the edge %.0f\n", horse_moved ? "moves" : "NEVER MOVES", horse_out);
+            if (!horse_moved || horse_out > 128) fails++;
+        }
         if (want_door && got_key) {
             int before = 0;
             {
-                Run r0 = play(&lv, &key_shot, 1);
-                before = r0.bodies_alive;
+                Run r0 = play(&lv, &key_shot, 1); // the key shot may open one by itself (P-17)
+                (void)r0;
+                before = nobj[OBJ_KEYDOOR];
             }
             for (int p = 0; p < NP && !got_door; p++)
                 for (int a = 0; a < 360 && !got_door; a += 3) {
@@ -271,9 +396,9 @@ int main(int argc, char **argv) {
                     Run r = play(&lv, two, 2);
                     if (r.events & EV_KEYDOOR) {
                         got_door = true;
-                        printf("   door   : key shot, then angle %3d power %4.0f -> opened, held %d, bodies %d -> %d\n",
-                               a, two[1].power, r.keys_held, before, r.bodies_alive);
-                        if (r.bodies_alive >= before) fails++;
+                        printf("   door   : key shot, then angle %3d power %4.0f -> opened, held %d, doors %d -> %d\n",
+                               a, two[1].power, r.keys_held, before, r.doors_alive);
+                        if (r.doors_alive >= before) fails++;
                     }
                 }
         }
@@ -288,23 +413,54 @@ int main(int argc, char **argv) {
                                 got_water = true;
                                 printf("   water  : two shots (%d,%.0f) (%d,%.0f) -> splash, %s (death %d)\n", a1,
                                        two[0].power, a2, two[1].power, r.lose ? "lost" : "NOT LOST", r.death);
-                                if (!r.lose || r.death != DEATH_WATER) fails++;
+                                if (lv.id[0] == 'P' ? r.lose : (!r.lose || r.death != DEATH_WATER)) fails++; // P levels: swimming
                             }
                         }
         }
         for (int i = 0; i < lv.nzones && want_water; i++) { // dropped straight into each pool
             if (lv.zones[i].layers != ZONE_WATER) continue;
-            vec2 c = v2((lv.zones[i].x0 + lv.zones[i].x1) / 2, (lv.zones[i].y0 + lv.zones[i].y1) / 2);
+            const Shape *zs = &lv.zones[i];
+            vec2 c = v2((zs->x0 + zs->x1) / 2, (zs->y0 + zs->y1) / 2);
+            // a pool around the course (5-18) has land in the middle of its box: a point in the water
+            for (float y = zs->y0 + 8; !phys_circle_overlaps(zs, c, 1) && y < zs->y1; y += 16)
+                for (float x = zs->x0 + 8; x < zs->x1; x += 16)
+                    if (phys_circle_overlaps(zs, v2(x, y), 1)) {
+                        c = v2(x, y);
+                        break;
+                    }
             DemoShot none = shot(0, 0);
             Run r = play_at(&lv, &none, 0, &c);
             printf("   water  : cat placed in pool %d -> %s, death %d\n", i, r.lose ? "lost" : "NOT LOST", r.death);
-            if (!r.lose || r.death != DEATH_WATER) fails++;
+            if (lv.id[0] == 'P' ? r.lose : (!r.lose || r.death != DEATH_WATER)) fails++; // P levels: swimming
         }
 #define MISS(w, g, n) if (w && !g) printf("   %-6s : no shot found\n", n)
+        MISS(want_portal, got_portal, "portal");
+        MISS(want_nuke, got_nuke, "nuke");
+        MISS(want_fake, got_fake, "fake");
+        MISS(want_gate, got_poor, "gate");
+        MISS(want_horse, got_hgoal, "hgoal");
+        MISS(want_horse, got_hurt, "horse");
+        MISS(want_mine, got_mine, "mine");
+        if (want_metro && !got_metro) printf("   metro  : NEVER TRIGGERED\n"), fails++;
+        if (want_wind && !got_wind) printf("   wind   : NEVER PUSHED\n"), fails++;
         MISS(want_db, got_db, "dblock");
         MISS(want_token, got_token, "token");
         MISS(want_pad, got_pad, "jump");
         MISS(want_cars && nobj[OBJ_CAR] + live_spawners > 0 && got_car == false && saw_cars, got_car, "car");
+        if ((want_cars && !saw_cars) || (want_chase && !got_chase)) { // the cat left alone for 20 s
+            DemoShot none = shot(0, 0);
+            g_min_frames = 1200;
+            Run r = play(&lv, &none, 0);
+            g_min_frames = 0;
+            if (want_cars && !saw_cars && r.cars_max > 0) {
+                saw_cars = true;
+                printf("   spawns : cat left alone -> up to %d cars/skulls on the course at once\n", r.cars_max);
+            }
+            if (want_chase && !got_chase && r.chase_max > 0) {
+                got_chase = true;
+                printf("   chase  : cat left alone -> chasers move, up to %.1f\n", r.chase_max);
+            }
+        }
         if (want_cars && !saw_cars) printf("   cars   : NONE SPAWNED\n"), fails++;
         MISS(want_skull, got_skull, "skull");
         MISS(want_water, got_water, "water");

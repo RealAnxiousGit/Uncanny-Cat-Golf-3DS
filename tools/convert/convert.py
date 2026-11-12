@@ -225,6 +225,7 @@ def convert_sprites(project, tc, out, report):
 
     for name, path, skip in (
         ("goal", "res://assetsNEW/scenes/objects/important/goal.tscn", ()),
+        ("goal_hole", "res://assetsNEW/scenes/objects/important/goal.tscn", ("Flag",)),
         ("coin", "res://assetsNEW/scenes/objects/collectibles/coin.tscn", ("ScorePopup",)),
     ):
         img, anchor = render_scene_sprite(project, tc, path, skip)
@@ -245,6 +246,74 @@ def convert_sprites(project, tc, out, report):
     if not KEEP_PNG:
         shutil.rmtree(tmp)
     log("  sprites: %d" % len(entries))
+
+
+# --- minigames --------------------------------------------------------------
+
+# extra music past master.tscn's songs (music/index.txt ids), for the minigames
+MINIGAME_MUSIC = ((30, "res://assetsNEW/music/minigames/musBort.ogg"),)
+
+
+def _hsv(h, s, v):
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)), 255)
+
+
+def convert_minigames(project, out):
+    """Bort Bash: gfx/mg_bort.t3x (+ .txt like sprites.txt) and gfx/mg_bort_bg.t3x.
+    The Borts' colorswap shader (pure red -> MidShade, pure blue -> ExtraShade, a random hue each)
+    is baked into BORT_HUES copies. Frames are shrunk here (Lanczos) to about their size on the
+    bottom screen; the txt's units-per-pixel column says by how much."""
+    gfx = os.path.join(out, "romfs", "gfx")
+    tmp = os.path.join(out, "tmp_minigames")
+    os.makedirs(gfx, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
+    g = "res://assetsNEW/graphics/minigames/bartbash/"
+    entries = []  # name, image, anchor, upp
+
+    def shrink(img, k):
+        w, h = max(1, round(img.size[0] * k)), max(1, round(img.size[1] * k))
+        return img.resize((w, h), Image.LANCZOS), (w / 2.0, h / 2.0), 1.0 / k
+
+    bort = Image.open(project.fs(g + "bort.png")).convert("RGBA")
+    src = np.array(bort)
+    red = np.all(src == (255, 0, 0, 255), axis=-1)
+    blue = np.all(src == (0, 0, 255, 255), axis=-1)
+    for h in range(8):
+        a = src.copy()
+        a[red] = _hsv(h / 8.0, 0.5, 1.0)
+        a[blue] = _hsv(h / 8.0, 1.0, 0.5)
+        im = Image.fromarray(a, "RGBA")
+        for f in range(2):
+            img, anc, upp = shrink(im.crop((f * 40, 0, f * 40 + 40, 60)), 0.6)
+            entries.append(("bort_%d_%d" % (h, f), img, anc, upp))
+    boom = Image.open(project.fs(g + "boom.png")).convert("RGBA")
+    for f in range(17):
+        img, anc, upp = shrink(boom.crop((f * 71, 0, f * 71 + 71, 100)), 0.6)
+        entries.append(("boom_%d" % f, img, anc, upp))
+    ranks = Image.open(project.fs(g + "bortranks.png")).convert("RGBA")
+    for f in range(7):
+        img, anc, upp = shrink(ranks.crop((f * 192, 0, f * 192 + 192, 192)), 0.5)
+        entries.append(("bortrank_%d" % f, img, anc, upp))
+    files, lines = [], []
+    for i, (name, img, anc, upp) in enumerate(entries):
+        p = os.path.join(tmp, "%02d_%s.png" % (i, name))
+        img.save(p)
+        files.append(p)
+        lines.append("%s %d %d %d %s %s %s %s" % (name, i, img.size[0], img.size[1], L._fmt(anc[0]),
+                                                L._fmt(anc[1]), L._fmt(upp), L._fmt(upp)))
+    tex3ds(files, os.path.join(gfx, "mg_bort.t3x"), "rgba8", atlas=True)
+    with open(os.path.join(gfx, "mg_bort.txt"), "w", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    # the cage's floor: meowlBG2.png at scale (1, 0.875) fills exactly x 256..768, y 64..512
+    bg = os.path.join(tmp, "bort_bg.png")
+    Image.open(project.fs("res://assetsNEW/graphics/minigames/meowl/meowlBG2.png")).convert("RGB") \
+        .resize((256, 256), Image.LANCZOS).save(bg)
+    tex3ds([bg], os.path.join(gfx, "mg_bort_bg.t3x"), "rgb565")
+    if not KEEP_PNG:
+        shutil.rmtree(tmp)
+    log("  minigames: bort bash, %d pictures" % len(entries))
 
 
 # --- top-screen sidebar -----------------------------------------------------
@@ -352,14 +421,16 @@ def convert_port(out):
 
 def import_loop(project, res_path):
     imp = project.fs(res_path) + ".import"
-    loop, offset = False, 0.0
+    loop, offset, bpm = False, 0.0, 0.0
     if os.path.exists(imp):
         for line in open(imp, encoding="utf-8"):
             if line.startswith("loop="):
                 loop = line.strip().endswith("true")
             if line.startswith("loop_offset="):
                 offset = float(line.split("=")[1])
-    return loop, offset
+            if line.startswith("bpm="):
+                bpm = float(line.split("=")[1])
+    return loop, offset, bpm
 
 
 def convert_audio(project, out):
@@ -374,8 +445,13 @@ def convert_audio(project, out):
         if isinstance(st, S.Ext) and st.path.endswith(".ogg"):
             fn = os.path.basename(st.path)
             shutil.copyfile(project.fs(st.path), os.path.join(mdir, fn))
-            loop, off = import_loop(project, st.path)
-            idx.append("%d %s %d %s" % (i, fn, int(loop), L._fmt(off)))
+            loop, off, bpm = import_loop(project, st.path)
+            idx.append("%d %s %d %s %s" % (i, fn, int(loop), L._fmt(off), L._fmt(bpm)))
+    for i, path in MINIGAME_MUSIC:
+        fn = os.path.basename(path)
+        shutil.copyfile(project.fs(path), os.path.join(mdir, fn))
+        loop, off, bpm = import_loop(project, path)
+        idx.append("%d %s %d %s %s" % (i, fn, int(loop), L._fmt(off), L._fmt(bpm)))
     with open(os.path.join(mdir, "index.txt"), "w", newline="\n") as f:
         f.write("\n".join(idx) + "\n")
     # sound effects: copied as they are (Ogg Vorbis), decoded on the console
@@ -451,7 +527,7 @@ def main():
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--no-thoughts", action="store_true", help="skip the thoughts clips (slowest step)")
     ap.add_argument("--keep-png", action="store_true", help="keep baked PNGs next to the .t3x files")
-    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,hud,menu,port,thoughts,text,demos,audio")
+    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,hud,menu,port,thoughts,text,demos,audio,minigames")
     a = ap.parse_args()
     KEEP_PNG = a.keep_png
     only = {s.strip() for s in a.only.split(",") if s.strip()}
@@ -472,6 +548,9 @@ def main():
     if want("sprites"):
         log("sprites:")
         convert_sprites(project, tc, a.out, report)
+    if want("minigames"):
+        log("minigames:")
+        convert_minigames(project, a.out)
     if want("hud"):
         log("hud:")
         convert_hud(project, a.out)

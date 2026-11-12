@@ -37,6 +37,16 @@ DYNAMIC = {
     "dog_goal.tscn": "doggoal",
     "smiley_ring.tscn": "ring",
     "smiley_coin.tscn": "scoin",
+    # World 4
+    "portal.tscn": "portal",
+    "nuke.tscn": "nuke",
+    "fake_goal.tscn": "fakegoal",
+    "final_ghost.tscn": "fghost",
+    "prism_gate.tscn": "prismgate",
+    # World 5
+    "horse_boss.tscn": "horse",
+    "horse_goal.tscn": "hgoal",
+    "land_mine.tscn": "mine",
 }
 CAR_SCENE = "res://assetsNEW/scenes/objects/baddies/car.tscn"
 SPAWNER_SCENE = "res://assetsNEW/scenes/objects/baddies/baddie_spawner.tscn"
@@ -46,10 +56,12 @@ CHUCKLE_SCENE = "res://assetsNEW/scenes/objects/baddies/chuckle.tscn"
 ZONES = {"sand_pit.tscn": "sand", "water_death.tscn": "water"}
 # Objects drawn at runtime from their own baked picture (<id>_d.t3x)
 PICTURED = {"dblock", "keydoor", "key", "skull", "token", "jumppad", "spawner", "car",
-            "switch", "dog", "doggoal", "ring", "scoin"}
+            "switch", "dog", "doggoal", "ring", "scoin", "portal", "nuke", "fakegoal", "prismgate",
+            "horse", "hgoal", "mine"}
 # the node that gets graphic.modulate = level.level_shade in each object's _ready()
 SHADED = {"skull": "AnimatedSprite2D", "car": "Sprite2D", "token": "AnimatedSprite2D", "spawner": "Door",
-          "jumppad": "Sprite2D", "dog": "Sprite2D", "doggoal": "AnimatedSprite2D", "ring": "AnimatedSprite2D"}
+          "jumppad": "Sprite2D", "dog": "Sprite2D", "doggoal": "AnimatedSprite2D", "ring": "AnimatedSprite2D",
+          "horse": "Sprite2D"}
 DYN_PX = 1.0  # pixels per world unit in the object pictures
 DYN_SKIP = {"ScorePopup", "ColorblindLabel", "editor_sprite", "lock"}
 # Secret keys (secret_key_trigger.gd / secret_key_hint.gd) free themselves until the key quest reaches step 2
@@ -162,7 +174,52 @@ def _kind_params(kind, n):
                 "color_r=%s" % _fmt(col[0]), "color_g=%s" % _fmt(col[1]), "color_b=%s" % _fmt(col[2])]
     if kind == "scoin":
         out.append("radius=%s" % _fmt(_circle_radius(n, 10.0)))
+    if kind == "portal":  # portal.tscn: a 16x16 RectangleShape2D
+        w, h = _rect_size(n, (16.0, 16.0))
+        out += ["size_x=%s" % _fmt(w), "size_y=%s" % _fmt(h)]
+    if kind == "nuke":  # nuke.gd (a collectible)
+        out += ["score_value=%s" % _fmt(int(n.get("score_value", 0) or 0)),
+                "radius=%s" % _fmt(_circle_radius(n, 16.0)),
+                "spawners=%d" % (1 if n.get("spawner_folder") else 0)]
+    if kind == "fakegoal":  # fake_goal.gd
+        sv = n.get("score_value")
+        out += ["score_value=%s" % _fmt(int(500 if sv is None else sv)),
+                "radius=%s" % _fmt(_circle_radius(n, 16.0)),
+                "ghost=%d" % (1 if n.get("final_ghost") else 0),
+                "alt=%d" % (1 if (n.get("objects_to_show") or n.get("canvas")) else 0)]
+    if kind == "horse":  # horse_boss.gd
+        d = S.vec(n.get("direction"))
+        out += ["health=%d" % int(n.get("health", 10) or 0),
+                "base_speed=%s" % _fmt(float(n.get("BASE_SPEED", 0) or 0)),
+                "attack_time=%d" % int(n.get("attack_time", 0) or 0),
+                "target_delay=%d" % int(n.get("target_delay", 0) or 0),
+                "dir_x=%s" % _fmt(d[0]), "dir_y=%s" % _fmt(d[1]),
+                "end_of_life=%d" % (1 if n.get("end_of_life") else 0)]
+    if kind == "hgoal":  # horse_goal.gd
+        out += ["active=%d" % (1 if n.get("active") else 0)]
+    if kind == "mine":  # land_mine.gd: its Detector
+        r = 16.0
+        det = n.child("Detector")
+        if det is not None:
+            r = _circle_radius(det, 16.0)
+        out.append("radius=%s" % _fmt(r))
+    if kind == "prismgate":  # prism_gate.gd (block.gd size)
+        w, h = S.vec(n.get("size"), (64.0, 64.0))
+        out += ["size_x=%s" % _fmt(w), "size_y=%s" % _fmt(h),
+                "prisms=%d" % int(n.get("prism_number", 0) or 0)]
     return out
+
+
+def _rect_size(n, default):
+    """Size of an Area2D's RectangleShape2D, in the object's own units."""
+    for c in n.children:
+        if c.type == "CollisionShape2D":
+            sh = c.get("shape")
+            if isinstance(sh, Sub) and sh.type == "RectangleShape2D":
+                w, h = S.vec(sh.get("size"), default)
+                sc = S.vec(c.get("scale"), (1.0, 1.0))
+                return w * abs(sc[0]), h * abs(sc[1])
+    return default
 
 
 def _circle_radius(n, default):
@@ -183,6 +240,10 @@ def _prepare_object(kind, root, rotate_deg=None):
             arrow.props["rotation"] = float(root.get("direction", 0) or 0) + 0.5 * math.pi
             if float(root.get("speed_granted", 0) or 0) > 20.0:  # Player.STOP_SPEED
                 arrow.props["frame"] = 1
+    if kind == "hgoal":  # horse_goal.gd activate(): the sprite shows once the goal is active
+        spr = root.child("AnimatedSprite2D")
+        if spr is not None:
+            spr.props["visible"] = True
     if kind == "switch" and not root.get("keep_face"):  # switch_block.gd change_face(): frame = switchState (0)
         spr = root.child("Sprite2D")
         if spr is not None:
@@ -204,6 +265,130 @@ def _resolve(n, path):
         if x is None:
             return None
     return x
+
+
+def _curve_points(curve):
+    """A Curve2D baked into a polyline with the distance along it (Godot's PathFollow2D progress)."""
+    data = curve.get("_data") if isinstance(curve, Sub) else None
+    raw = (data or {}).get("points") or []
+    vals = []
+    for v in raw:
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
+        elif isinstance(v, (tuple, list)):
+            vals.extend(float(c) for c in v[:2])
+        else:
+            vals.extend(S.vec(v))
+    pts = [(vals[i], vals[i + 1], vals[i + 2], vals[i + 3], vals[i + 4], vals[i + 5]) for i in range(0, len(vals) - 5, 6)]
+    poly = []
+    for i, (ix, iy, ox, oy, px, py) in enumerate(pts):
+        if i == 0:
+            poly.append((px, py))
+            continue
+        _ix0, _iy0, ox0, oy0, px0, py0 = pts[i - 1]
+        a, b = (px0, py0), (px0 + ox0, py0 + oy0)
+        c, d = (px + ix, py + iy), (px, py)
+        for k in range(1, 33):
+            t = k / 32.0
+            u = 1 - t
+            poly.append((u * u * u * a[0] + 3 * u * u * t * b[0] + 3 * u * t * t * c[0] + t * t * t * d[0],
+                         u * u * u * a[1] + 3 * u * u * t * b[1] + 3 * u * t * t * c[1] + t * t * t * d[1]))
+    dist = [0.0]
+    for i in range(1, len(poly)):
+        dist.append(dist[-1] + math.hypot(poly[i][0] - poly[i - 1][0], poly[i][1] - poly[i - 1][1]))
+    return poly, dist
+
+
+def _curve_at(poly, dist, s):
+    if not poly:
+        return (0.0, 0.0)
+    s = max(0.0, min(s, dist[-1]))
+    for i in range(1, len(poly)):
+        if dist[i] >= s:
+            f = (s - dist[i - 1]) / max(1e-6, dist[i] - dist[i - 1])
+            return (poly[i - 1][0] + (poly[i][0] - poly[i - 1][0]) * f, poly[i - 1][1] + (poly[i][1] - poly[i - 1][1]) * f)
+    return poly[-1]
+
+
+def _key_value(keys, t):
+    """An animation value track at time t (linear between keys, or the last key for update = 1)."""
+    times = list(keys.get("times") or [])
+    values = list(keys.get("values") or [])
+    if not times:
+        return None
+    if t <= times[0]:
+        return values[0]
+    for i in range(1, len(times)):
+        if t < times[i]:
+            if keys.get("update") == 1:
+                return values[i - 1]
+            f = (t - times[i - 1]) / max(1e-6, times[i] - times[i - 1])
+            a, b = values[i - 1], values[i]
+            if isinstance(a, (int, float)):
+                return a + (b - a) * f
+            av, bv = S.vec(a), S.vec(b)
+            return (av[0] + (bv[0] - av[0]) * f, av[1] + (bv[1] - av[1]) * f)
+    return values[-1]
+
+
+def level_tracks(root, goal_node, player_node):
+    """Autoplaying animations that move the game: wind (the player's additional_velocity) and a goal
+    carried along a path (PathFollow2D progress). Returns ["track <kind> <len> <loop> <n> t x y ..."]."""
+    out = []
+    for n in root.walk():
+        if n.type != "AnimationPlayer" or not n.get("autoplay"):
+            continue
+        name = str(n.get("autoplay"))
+        anim = None
+        for lib in (n.get("libraries") or {}).values():
+            data = lib.get("_data") if isinstance(lib, Sub) else None
+            if data and name in data:
+                anim = data[name]
+        if not isinstance(anim, Sub):
+            continue
+        length = float(anim.get("length", 1.0) or 1.0)
+        loop = 1 if anim.get("loop_mode") else 0
+        base = n.parent if n.get("root_node") is None else _resolve(n, n.get("root_node"))
+        i = 0
+        while anim.get("tracks/%d/path" % i) is not None:
+            path = str(anim.get("tracks/%d/path" % i))
+            keys = anim.get("tracks/%d/keys" % i) or {}
+            i += 1
+            if anim.get("tracks/%d/type" % (i - 1)) not in (None, "value") or ":" not in path:
+                continue
+            node_path, prop = path.rsplit(":", 1)
+            target = _resolve(base, node_path) if base is not None else None
+            if target is None:
+                continue
+            if prop == "additional_velocity" and target is player_node:
+                ks = []
+                for t, v in zip(keys.get("times") or [], keys.get("values") or []):
+                    x, y = S.vec(v)
+                    ks.append("%s %s %s" % (_fmt(float(t)), _fmt(x), _fmt(y)))
+                out.append("track wind %s %d 1 %d %s" % (_fmt(length), loop, len(ks), " ".join(ks)))
+            if prop == "progress" and target.type == "PathFollow2D" and goal_node is not None:
+                x = goal_node
+                while x is not None and x is not target:
+                    x = x.parent
+                if x is not target:
+                    continue
+                poly, dist = _curve_points(target.parent.get("curve") if target.parent is not None else None)
+                if not poly:
+                    continue
+                gx = S.global_xform(target.parent)
+                off = S.vec(goal_node.get("position"), (0.0, 0.0))
+                ks = []
+                steps = max(2, int(length * 10))
+                for k in range(steps + 1):
+                    t = length * k / steps
+                    s = _key_value(keys, t)
+                    if s is None:
+                        continue
+                    px, py = _curve_at(poly, dist, float(s))
+                    wx, wy = S.apply(gx, (px + off[0], py + off[1]))
+                    ks.append("%s %s %s" % (_fmt(t), _fmt(wx), _fmt(wy)))
+                out.append("track goal %s %d 0 %d %s" % (_fmt(length), loop, len(ks), " ".join(ks)))
+    return out
 
 
 def render_slot_frames(project, tc, root):
@@ -250,7 +435,7 @@ def _render_object(project, tc, root, kind, level_shade):
         x = n
         skip = False
         while x is not None and x is not root:
-            if x.name in DYN_SKIP:
+            if x.name in DYN_SKIP and not (kind == "prismgate" and x.name == "lock"):
                 skip = True
             x = x.parent
         if skip or not S.visible(n):
@@ -408,9 +593,52 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                        and all(abs(a - b) < 1e-3 for a, b in zip(S.color(c.get("modulate")), col))]
         for c in members:
             coin_ring.setdefault(id(c), ri)
+    # fake_goal.gd: tiles_to_remove goes off (role 2), objects_to_show appear and the CanvasModulate takes
+    # new_color: the course is baked again that way (<id>_u2 / _o2), shown once the fake goal is hit
+    alt_shown = []
+    alt_canvas = None
+    easy_only = []  # easy_mode_ending.gd objects_to_add: freed outside easy mode
+    metronomes = []  # (node, [entries]) in scene order
+    for n in root.walk():
+        base = os.path.basename(n.scene) if n.scene else ""
+        if base == "metronome.tscn":
+            m = len(metronomes)
+            entries = [_resolve(n, path) for path in (n.get("TriggerList") or [])]
+            for i, t in enumerate(entries):
+                if n.get("tile") and t is not None and t.type == "TileMapLayer" and id(t) not in tile_groups:
+                    tile_groups[id(t)] = (len(tile_groups) + 1, 3, m * 16 + i, t)
+            metronomes.append((n, entries))
+        if base == "fake_goal.tscn":
+            if n.get("tiles_to_remove"):
+                t = _resolve(n, n.get("tiles_to_remove"))
+                if t is not None and id(t) not in tile_groups:
+                    tile_groups[id(t)] = (len(tile_groups) + 1, 2, 0, t)
+            for path in n.get("objects_to_show") or []:
+                t = _resolve(n, path)
+                if t is not None:
+                    alt_shown.append(t)
+            if n.get("canvas"):
+                alt_canvas = S.color(n.get("new_color"))
+        if n.script is not None and str(getattr(n.script, "path", n.script)).endswith("easy_mode_ending.gd"):
+            for path in n.get("objects_to_add") or []:
+                t = _resolve(n, path)
+                if t is not None:
+                    easy_only.append(t)
+    goal_node = player_node = None
+    for n in root.walk():
+        base = os.path.basename(n.scene) if n.scene else ""
+        if base == "goal.tscn" and goal_node is None:
+            goal_node = n
+        if base == "player.tscn" and player_node is None:
+            player_node = n
+    tracks = level_tracks(root, goal_node, player_node)
     lights_hidden = set()  # lights_out_event.gd: what goes dark (baked again without it: <id>_u2 / _o2)
     node_of = []  # the scene node behind each object, to link slots to their tokens
     slot_links = []  # (object index, token node)
+    portal_links = []  # (object index, target portal node)
+    hgoal_links = []  # (object index, next_goal node)
+    for t in easy_only:
+        dynamic_roots.add(id(t))
     for n in root.walk():
         if n.scene:
             base = os.path.basename(n.scene)
@@ -467,6 +695,29 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                 objects.append(("police", (0.0, 0.0), 0.0, 1.0, 1.0, params, True))
                 node_of.append(n)
                 continue
+            if base == "metronome.tscn":  # metronome.gd: beats from the music; its look is a screen overlay
+                dynamic_roots.add(id(n))
+                m = [mm for mm, (mn, _e) in enumerate(metronomes) if mn is n][0]
+                snd = n.get("playTriggerSound")
+                sp = str(getattr(snd, "path", "") or "")
+                sk = {"rhythm_block.ogg": 1, "polyrhythm_block.ogg": 2}.get(os.path.basename(sp), 0)
+                vis = n.get("Visual")
+                objects.append(("metronome", (0.0, 0.0), 0.0, 1.0, 1.0,
+                                ["m=%d" % m, "every=%d" % int(n.get("TriggerEvery", 2) or 2),
+                                 "visual=%d" % (0 if vis is False else 1),
+                                 "n=%d" % len(metronomes[m][1]), "tile=%d" % (1 if n.get("tile") else 0),
+                                 "snd=%d" % sk,
+                                 "vol=%s" % _fmt(10 ** (float(n.get("triggerSoundVolume", 0) or 0) / 20.0)),
+                                 "pitch=%s" % _fmt(float(n.get("triggerSoundPitch", 1.0) or 1.0))], True))
+                node_of.append(n)
+                continue
+            if base == "boss_appear_event.tscn":
+                dynamic_roots.add(id(n))
+                for poly in _zone_polys(n):
+                    zones.append(("bossappear", poly))
+                objects.append(("bossappear", S.apply(S.global_xform(n), (0, 0)), 0.0, 1.0, 1.0, [], True))
+                node_of.append(n)
+                continue
             if base in ("lights_out_event.tscn", "ash_baby_event.tscn"):  # CustomEvent areas, once each
                 dynamic_roots.add(id(n))
                 ek = "lights" if base.startswith("lights") else "ashbaby"
@@ -519,6 +770,28 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                                 params.append("spr2=%d" % _dyn_sprite(dyn, pic2))
                     if kind == "scoin":
                         params.append("ring=%d" % coin_ring.get(id(n), -1))
+                    if kind == "hgoal":
+                        hgoal_links.append((len(objects), _resolve(n, n.get("next_goal")) if n.get("next_goal") else None))
+                    if kind == "portal":
+                        portal_links.append((len(objects), _resolve(n, n.get("portal_target"))
+                                             if n.get("portal_target") else None))
+                    if kind == "fakegoal":  # after it is hit: the hole without its flag
+                        fl = n.child("Flag")
+                        if fl is not None:
+                            keep = fl.props.get("visible")
+                            fl.props["visible"] = False
+                            pic2 = _render_object(project, tc, n, kind, S.color(p.get("level_shade")))
+                            if keep is None:
+                                del fl.props["visible"]
+                            else:
+                                fl.props["visible"] = keep
+                            if pic2 is not None:
+                                params.append("spr2=%d" % _dyn_sprite(dyn, pic2))
+                        tg = None
+                        if n.get("tiles_to_remove"):
+                            t = _resolve(n, n.get("tiles_to_remove"))
+                            tg = tile_groups.get(id(t)) if t is not None else None
+                        params.append("group=%d" % (tg[0] if tg else 0))
                     if kind == "doggoal":
                         tg = tile_groups.get(goal_tiles.get(id(n)))
                         params.append("group=%d" % (tg[0] if tg else 0))
@@ -532,8 +805,35 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
     # slot -> the index of its token among the level's coins and tokens (the game's coin list order)
     coin_index = {}
     for i, (kind, *_rest) in enumerate(objects):
-        if kind in ("coin", "token"):
+        if kind in ("coin", "token", "nuke"):
             coin_index[id(node_of[i])] = len(coin_index)
+    # portal -> its target's index among the level's portals
+    portal_index = {}
+    for i, (kind, *_rest) in enumerate(objects):
+        if kind == "portal":
+            portal_index[id(node_of[i])] = len(portal_index)
+    for m, (mn, entries) in enumerate(metronomes):
+        if mn.get("tile"):
+            continue
+        for i, t in enumerate(entries):
+            if t is None:
+                continue
+            for oi, (kind, *_rest) in enumerate(objects):
+                if kind != "ghost":
+                    continue
+                x = node_of[oi]
+                while x is not None and x is not t:
+                    x = x.parent
+                if x is t:
+                    objects[oi][5].extend(["met=%d" % m, "mslot=%d" % i])
+    hgoal_index = {}
+    for i, (kind, *_rest) in enumerate(objects):
+        if kind == "hgoal":
+            hgoal_index[id(node_of[i])] = len(hgoal_index)
+    for oi, tgt in hgoal_links:
+        objects[oi][5].append("next=%d" % hgoal_index.get(id(tgt), -1) if tgt is not None else "next=-1")
+    for oi, tgt in portal_links:
+        objects[oi][5].append("target=%d" % portal_index.get(id(tgt), -1) if tgt is not None else "target=-1")
     for oi, tok in slot_links:
         objects[oi][5].append("coin=%d" % coin_index.get(id(tok), -1) if tok is not None else "coin=-1")
     if isinstance(win_conf, str) and win_conf:
@@ -615,6 +915,27 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
     if lights_hidden:  # the lights-out look
         cm = None if modulate_node is not None and id(modulate_node) in lights_hidden else modulate_canvas
         under2, over2 = _bake(project, tc, draw_items, size, bounds, scale, player_index, cm, lights_hidden, hidden_by)
+    elif alt_shown or alt_canvas is not None:  # the fake goal's look: its objects shown, the new colour
+        saved = [(t, t.props.get("visible")) for t in alt_shown]
+        for t in alt_shown:
+            t.props["visible"] = True
+        items2 = []
+        for n in root.walk():
+            if n is root or in_dynamic(n) or n.type == "CanvasLayer" or S.in_canvas_layer(n):
+                continue
+            if n.type in SKIP_TYPES or not S.visible(n):
+                continue
+            if n.type in ("Sprite2D", "AnimatedSprite2D", "Polygon2D", "TileMapLayer", "PointLight2D",
+                          "NinePatchRect") and id(n) not in tile_groups:
+                items2.append(n)
+        for t, v in saved:
+            if v is None:
+                del t.props["visible"]
+            else:
+                t.props["visible"] = v
+        items2.sort(key=lambda n: (S.global_z(n), n.index))
+        cm = alt_canvas if alt_canvas is not None else modulate_canvas
+        under2, over2 = _bake(project, tc, items2, size, bounds, scale, player_index, cm, set(), hidden_by)
     else:
         under2 = over2 = None
     # each switchable layer: its own picture file (<id>_t<group>.t3x; too big for the object atlas),
@@ -682,6 +1003,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
             lines.append("poly %d %d %s" % (bits, len(data), " ".join("%s %s" % (_fmt(x), _fmt(y)) for x, y in data)))
         else:
             lines.append("circ %d %s %s %s" % (bits, _fmt(data[0]), _fmt(data[1]), _fmt(data[2])))
+    lines.extend(tracks)
     for zk, poly in zones:
         lines.append("zone %s %d %s" % (zk, len(poly), " ".join("%s %s" % (_fmt(x), _fmt(y)) for x, y in poly)))
     dyn_files = []

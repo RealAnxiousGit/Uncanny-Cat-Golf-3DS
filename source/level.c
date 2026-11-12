@@ -8,7 +8,9 @@
 static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "dblock", "keydoor", "key", "skull",
                                                "token", "jumppad", "spawner", "car", "police",
                                                "slot", "slotmachine", "switch", "dog", "doggoal", "ring",
-                                               "scoin", "tiles", "lights", "ashbaby"};
+                                               "scoin", "tiles", "lights", "ashbaby",
+                                               "portal", "nuke", "fakegoal", "fghost", "prismgate",
+                                               "horse", "hgoal", "mine", "bossappear", "metronome"};
 
 void shape_update_bbox(Shape *s) {
     if (s->kind == SHAPE_CIRCLE) {
@@ -59,6 +61,7 @@ bool level_load(LevelDef *lv, const char *path) {
             if (strstr(rest, "mirror_level")) lv->flags |= LF_MIRROR;
             if (strstr(rest, "hideScoring")) lv->flags |= LF_HIDE_SCORING;
             if (strstr(rest, "unskippable")) lv->flags |= LF_UNSKIPPABLE;
+            if (strstr(rest, "final_ghost_level")) lv->flags |= LF_FINAL_GHOST;
         } else if (!strcmp(key, "image")) {
             char which[8] = {0};
             sscanf(rest, "%d %7s", &lv->image_size, which);
@@ -90,6 +93,28 @@ bool level_load(LevelDef *lv, const char *path) {
             }
             shape_update_bbox(s);
             lv->nshapes++;
+        } else if (!strcmp(key, "track") && lv->ntracks < MAX_TRACKS) {
+            char kind[16] = {0};
+            int loop = 0, disc = 0, n = 0, used = 0;
+            float len = 0;
+            if (sscanf(rest, "%15s %f %d %d %d%n", kind, &len, &loop, &disc, &n, &used) < 5 || n <= 0) continue;
+            Track2 *t = &lv->tracks[lv->ntracks];
+            t->kind = !strcmp(kind, "wind") ? TRACK_WIND : !strcmp(kind, "goal") ? TRACK_GOAL : 0;
+            if (!t->kind) continue;
+            t->n = n;
+            t->loop = loop != 0;
+            t->discrete = disc != 0;
+            t->length = len;
+            t->t = malloc(n * sizeof(float));
+            t->x = malloc(n * sizeof(float));
+            t->y = malloc(n * sizeof(float));
+            char *p = rest + used;
+            for (int i = 0; i < n; i++) {
+                t->t[i] = strtof(p, &p);
+                t->x[i] = strtof(p, &p);
+                t->y[i] = strtof(p, &p);
+            }
+            lv->ntracks++;
         } else if (!strcmp(key, "obj")) {
             char name[24] = {0};
             int n = 0;
@@ -128,7 +153,7 @@ bool level_load(LevelDef *lv, const char *path) {
             z.kind = SHAPE_POLY;
             z.layers = !strcmp(kind, "sand") ? ZONE_SAND : !strcmp(kind, "water") ? ZONE_WATER
                      : !strcmp(kind, "police") ? ZONE_POLICE : !strcmp(kind, "lights") ? ZONE_LIGHTS
-                     : !strcmp(kind, "ashbaby") ? ZONE_ASHBABY : 0;
+                     : !strcmp(kind, "ashbaby") ? ZONE_ASHBABY : !strcmp(kind, "bossappear") ? ZONE_BOSSAPPEAR : 0;
             z.n = (int)strtol(p, &p, 10);
             if (!z.layers || z.n < 3) continue;
             z.pts = malloc(z.n * sizeof(vec2));
@@ -164,6 +189,7 @@ void level_free(LevelDef *lv) {
     for (int i = 0; i < lv->nzones; i++) free(lv->zones[i].pts);
     free(lv->zones);
     free(lv->objs);
+    for (int i = 0; i < lv->ntracks; i++) free(lv->tracks[i].t), free(lv->tracks[i].x), free(lv->tracks[i].y);
     memset(lv, 0, sizeof(*lv));
 }
 

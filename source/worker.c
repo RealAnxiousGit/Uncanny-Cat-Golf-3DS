@@ -146,10 +146,13 @@ void prefetch_drop(void) {
 static void loop(void *arg) {
     (void)arg;
     while (running) {
-        bool busy = audio_bg_step();
-        busy = thoughts_bg_step() || busy;
-        busy = save_bg_step() || busy;
-        busy = fetch_step() || busy;
+        // files the game waits on (the menus behind the intro, the next level) come before the
+        // sound decodes: with ~60 sounds queued at boot, one decode per 64 KB chunk kept the menu
+        // pictures from being ready when the intro ended, and the fade stood on black waiting
+        bool busy = thoughts_bg_step();
+        bool reading = fetch_step();
+        if (!reading) busy = audio_bg_step() || busy;
+        busy = save_bg_step() || busy || reading;
         if (!busy) svcSleepThread(2 * 1000 * 1000); // 2 ms
     }
 }

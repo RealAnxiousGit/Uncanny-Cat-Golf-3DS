@@ -30,13 +30,14 @@ static bool ok;
 static float vol_master = 1, vol_music = 1, vol_sound = 1;
 
 // music
-typedef struct { int id; char file[64]; bool loop; float loop_offset; } Track;
+typedef struct { int id; char file[64]; bool loop; float loop_offset, bpm; } Track;
 static Track tracks[32];
 static int ntracks;
 static OggVorbis_File mvf;
 static bool music_open;
 static int music_channels, music_rate;
 static const Track *cur_track;
+static volatile uint64_t music_played; // samples of the current track played through
 static ndspWaveBuf mbuf[MUSIC_BUFS];
 static int16_t *mdata[MUSIC_BUFS];
 
@@ -60,7 +61,8 @@ static void load_track_index(void) {
     while (fgets(line, sizeof(line), f) && ntracks < 32) {
         Track t;
         int loop = 0;
-        if (sscanf(line, "%d %63s %d %f", &t.id, t.file, &loop, &t.loop_offset) == 4) {
+        t.bpm = 0;
+        if (sscanf(line, "%d %63s %d %f %f", &t.id, t.file, &loop, &t.loop_offset, &t.bpm) >= 4) {
             t.loop = loop != 0;
             tracks[ntracks++] = t;
         }
@@ -370,6 +372,7 @@ void music_play(int id) {
     music_open = true;
     cur_track = t;
     ndspChnReset(0);
+    music_played = 0;
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
     ndspChnSetRate(0, music_rate);
     ndspChnSetFormat(0, music_channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
@@ -385,12 +388,21 @@ void music_play(int id) {
     if (mthread) LightEvent_Signal(&mev);
 }
 
+// the beat the music is on (metronome.gd _get_current_beat), or -1 with no music or no BPM
+int music_beat(void) {
+    if (!ok || !music_open || !cur_track || cur_track->bpm <= 0 || music_rate <= 0) return -1;
+    double pos = (double)(music_played + ndspChnGetSamplePos(0)) / music_rate;
+    return (int)(pos * cur_track->bpm / 60.0);
+}
+
 static bool music_step(void) {
     bool did = false;
     LightLock_Lock(&mlock);
     if (music_open)
         for (int i = 0; i < MUSIC_BUFS; i++)
             if (mbuf[i].status == NDSP_WBUF_DONE) {
+                music_played += mbuf[i].nsamples;
+                mbuf[i].nsamples = 0;
                 music_fill(&mbuf[i], mdata[i]);
                 did = true;
                 break; // one buffer per step keeps the lock short

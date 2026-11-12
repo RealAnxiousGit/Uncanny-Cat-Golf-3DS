@@ -45,7 +45,9 @@ typedef struct {
 enum {
     OBJ_PLAYER, OBJ_GOAL, OBJ_GHOST, OBJ_COIN, OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_KEY, OBJ_SKULL,
     OBJ_TOKEN, OBJ_JUMPPAD, OBJ_SPAWNER, OBJ_CAR, OBJ_POLICE, OBJ_SLOT, OBJ_SLOTMACHINE,
-    OBJ_SWITCH, OBJ_DOG, OBJ_DOGGOAL, OBJ_RING, OBJ_SCOIN, OBJ_TILES, OBJ_LIGHTS, OBJ_ASHBABY, OBJ_COUNT
+    OBJ_SWITCH, OBJ_DOG, OBJ_DOGGOAL, OBJ_RING, OBJ_SCOIN, OBJ_TILES, OBJ_LIGHTS, OBJ_ASHBABY,
+    OBJ_PORTAL, OBJ_NUKE, OBJ_FAKEGOAL, OBJ_FGHOST, OBJ_PRISMGATE,
+    OBJ_HORSE, OBJ_HGOAL, OBJ_MINE, OBJ_BOSSAPPEAR, OBJ_METRONOME, OBJ_COUNT
 };
 
 #define MAX_PARAMS 24
@@ -60,7 +62,7 @@ typedef struct {
 } ObjDef;
 
 // Area zones (outline only; their art is in the floor picture)
-enum { ZONE_SAND = 1, ZONE_WATER = 2, ZONE_POLICE = 3, ZONE_LIGHTS = 4, ZONE_ASHBABY = 5 };
+enum { ZONE_SAND = 1, ZONE_WATER = 2, ZONE_POLICE = 3, ZONE_LIGHTS = 4, ZONE_ASHBABY = 5, ZONE_BOSSAPPEAR = 6 };
 
 // Pictures of dynamic objects in <id>_d.t3x
 typedef struct { int w, h; float ax, ay; } DynSprite;
@@ -68,7 +70,18 @@ typedef struct { int w, h; float ax, ay; } DynSprite;
 
 enum {
     LF_ALWAYS_OB = 1, LF_NEVER_OB = 2, LF_MIRROR = 4, LF_HIDE_SCORING = 8, LF_UNSKIPPABLE = 16,
+    LF_FINAL_GHOST = 32, // level.gd final_ghost_level: the Thinker is hidden
 };
+
+// an animation that moves the game (levels.py level_tracks): wind on the cat, a goal on a path
+enum { TRACK_WIND = 1, TRACK_GOAL = 2 };
+#define MAX_TRACKS 4
+typedef struct {
+    int kind, n;
+    bool loop, discrete;
+    float length;
+    float *t, *x, *y;
+} Track2;
 
 typedef struct {
     char id[16];
@@ -90,6 +103,8 @@ typedef struct {
     Shape *zones; // layers holds the ZONE_ kind
     int ndspr;
     DynSprite dspr[MAX_DSPR];
+    int ntracks;
+    Track2 tracks[MAX_TRACKS];
 } LevelDef;
 
 bool level_load(LevelDef *lv, const char *path);

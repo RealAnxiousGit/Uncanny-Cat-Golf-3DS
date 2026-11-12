@@ -14,6 +14,7 @@
 #include "game.h"
 #include "save.h"
 #include "thoughts.h"
+#include "bort.h"
 
 #define COURSE_X 40.0f
 #define COURSE_W 240.0f
@@ -21,10 +22,12 @@
 #define TOP_W 400
 #define SCR_H 240
 #define NWORLDS 8
+#define MG_WORLD (NWORLDS - 1) // the level select's last page lists the minigames
+enum { MG_BORT, NMINIGAMES };
 
 // ---------------------------------------------------------------- sprites
 typedef struct { char name[32]; C2D_SpriteSheet *sheet; int idx; float ax, ay, ux, uy; } SpriteInfo;
-#define MAX_SPR 200
+#define MAX_SPR 320
 static SpriteInfo sprinfo[MAX_SPR];
 static int nspr;
 static C2D_SpriteSheet sprites, hudsheet, top_bg, menusheet, settings_bg, jumpscare_sheet, creditsheet;
@@ -177,6 +180,7 @@ static void load_level_index(void) {
         }
     }
     fclose(f);
+    wcount[MG_WORLD] = NMINIGAMES;
 }
 
 // ---------------------------------------------------------------- settings
@@ -240,8 +244,23 @@ static void save_settings(void) {
     cfg_write_later(config);
 }
 
+static int level_rank(int w, int i);
+
+// pthru total_prisms: each level's best rank (P = 5 prisms), added up
+static int total_prisms(void) {
+    int n = 0;
+    for (int w = 0; w < NWORLDS; w++)
+        for (int i = 0; i < wcount[w]; i++) {
+            int r = level_rank(w, i);
+            if (r > 0) n += r;
+        }
+    return n;
+}
+
+static int cur_world; // the level being played (declared again with the app state below)
+
 static GameSettings game_settings(void) {
-    GameSettings g = {set.sens10 / 10.0f, set.invert, set.buffer};
+    GameSettings g = {set.sens10 / 10.0f, set.invert, set.buffer, total_prisms(), cur_world == 6};
     return g;
 }
 
@@ -266,7 +285,7 @@ static void record_result(const char *id, int score, float time, int rank, int s
 }
 
 // ---------------------------------------------------------------- app state
-enum { ST_SELECT, ST_PLAY, ST_PAUSE, ST_SETTINGS, ST_INTRO };
+enum { ST_SELECT, ST_PLAY, ST_PAUSE, ST_SETTINGS, ST_INTRO, ST_BORT };
 
 static C3D_RenderTarget *top, *bot;
 static C2D_TextBuf tbuf;
@@ -278,6 +297,7 @@ static bool level_loaded;
 static C2D_SpriteSheet floor_u, floor_o, dyn_sheet;
 static C2D_SpriteSheet floor_u2, floor_o2, ashbaby_sheet; // lights-out pictures, 3-10's Ash Baby
 static int ashbaby_a; // ash_baby_event.gd: jumpscare.modulate.a8, 254 falling by 2 a frame
+static bool goal_flag = true; // goal.gd has_flag
 static GameSettings gset;
 static int jumpscare_t, results_t, win_t;
 static int results_stage; // 0 sliding in, 1 counting, 2 rank shown
@@ -340,6 +360,7 @@ static void unload_level(void) {
     if (ashbaby_sheet) C2D_SpriteSheetFree(ashbaby_sheet);
     floor_u2 = floor_o2 = ashbaby_sheet = NULL;
     ashbaby_a = 0;
+    goal_flag = true;
     for (int t = 0; t < MAX_TILES; t++) {
         if (tile_sheet[t]) C2D_SpriteSheetFree(tile_sheet[t]);
         tile_sheet[t] = NULL;
@@ -385,7 +406,10 @@ static bool start_level_(int w, int l) {
         dyn_sheet = sheet_load(path);
     }
     for (int i = 0; i < level.nobjs; i++) {
-        if (level.objs[i].type == OBJ_LIGHTS && !floor_u2) {
+        if (level.objs[i].type == OBJ_GOAL) goal_flag = obj_param(&level.objs[i], "has_flag", 1) != 0;
+        bool alt = level.objs[i].type == OBJ_LIGHTS ||
+                   (level.objs[i].type == OBJ_FAKEGOAL && obj_param(&level.objs[i], "alt", 0) != 0);
+        if (alt && !floor_u2) {
             snprintf(path, sizeof(path), "%s/levels/w%d/%s_u2.t3x", data_root(), w, wnames[w][l]);
             floor_u2 = sheet_load(path);
             if (level.has_over) {
@@ -439,7 +463,7 @@ static void next_level(void) {
 // ---------------------------------------------------------------- transitions
 // Screen changes fade through black (the original cuts straight across). The change itself happens
 // on the first frame after the screen is fully black, so a level load's pause is never seen.
-enum { TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS, TR_INTRO_DONE };
+enum { TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS, TR_INTRO_DONE, TR_MINIGAME };
 #define TR_OUT (1.0f / 60 / 0.12f) // 0.12 s to black
 #define TR_IN (1.0f / 60 / 0.16f)  // 0.16 s back
 static int tr_phase = 2, tr_act, tr_a, tr_b; // phase 0 idle, 1 going dark, 2 coming back
@@ -451,7 +475,7 @@ static float tr_out = TR_OUT, tr_in = TR_IN; // the intro fades slower
 // the level after (w, l), or false at the end of the game
 static bool level_after(int *w, int *l) {
     if (*l + 1 < wcount[*w]) return ++*l, true;
-    if (*w + 1 < NWORLDS && wcount[*w + 1] > 0) return ++*w, *l = 0, true;
+    if (*w + 1 < MG_WORLD && wcount[*w + 1] > 0) return ++*w, *l = 0, true;
     return false;
 }
 
@@ -480,6 +504,7 @@ static void go(int act, int a, int b) {
 
 static void open_settings(int back);
 static void close_settings_now(void);
+static void start_minigame(int which);
 
 static void transition_step(void) {
     if (tr_phase == 1 && tr_k >= 1) {
@@ -490,6 +515,7 @@ static void transition_step(void) {
         case TR_SETTINGS: open_settings(tr_a); break;
         case TR_CLOSE_SETTINGS: close_settings_now(); break;
         case TR_INTRO_DONE: boot_finish(); state = ST_SELECT; break;
+        case TR_MINIGAME: start_minigame(tr_a); break;
         }
         tr_phase = 2;
     } else if (tr_phase == 1) {
@@ -508,6 +534,35 @@ static void draw_fade(float w) {
 
 // ---------------------------------------------------------------- sounds and thoughts
 static void play_events(uint64_t ev) {
+    if (ev & EV_METRO_BEAT) sfx_play("gimmicks/metronome.ogg", game.metro_beat_pitch, 1);
+    if (ev & EV_METRO_TRIG)
+        for (int m = 0; m < game.nmetros; m++)
+            if (game.metro_trig & (1u << m))
+                sfx_play(game.metros[m].snd == 2 ? "gimmicks/polyrhythm_block.ogg" : "gimmicks/rhythm_block.ogg",
+                         game.metros[m].pitch, game.metros[m].vol);
+    if (ev & EV_HCHARGEUP) sfx_play("gimmicks/boss_chargeup.ogg", 1, 1);
+    if (ev & EV_HCHARGE) sfx_play("gimmicks/boss_charge.ogg", 1, 1);
+    if (ev & EV_HBOUNCE) sfx_play("gimmicks/boss_bump.ogg", 1, 1);
+    if (ev & EV_HHURT) {
+        static const char *HURT[] = {"gimmicks/boss_hurt1.ogg", "gimmicks/boss_hurt2.ogg", "gimmicks/boss_hurt3.ogg"};
+        sfx_play(HURT[rand() % 3], 1, 1);
+    }
+    if (ev & EV_HBOOM) sfx_play("game/resultsBang.ogg", 0.9f + 0.2f * (rand() / (float)RAND_MAX), 1);
+    if (ev & EV_HBOOMQ) sfx_play("game/resultsBang.ogg", 0.9f + 0.2f * (rand() / (float)RAND_MAX), 0.56f);
+    if (ev & EV_HLAUNCH) sfx_play("gimmicks/bossgoal_launch.ogg", 1, 1);
+    if (ev & EV_HDIE) sfx_play("enemy/horse_death_supreme.ogg", 1, 1);
+    if (ev & EV_MINE) sfx_play("gimmicks/explosion1.ogg", 1, 1);
+    if (ev & EV_MUTE) music_play(-1);
+    if (ev & EV_PORTAL) sfx_play("gimmicks/portal.ogg", 1, 1);
+    if (ev & EV_NUKE) sfx_play("gimmicks/explosion1.ogg", 1, 1);
+    if (ev & EV_FAKEGOAL) sfx_play("gimmicks/fake_goal_bump.ogg", 1, 1);
+    if (ev & EV_FAKEALT) { // 4-17's and P-17's sounds_to_play: "explosion" and "siren"
+        sfx_play("minigame/meowl_die.ogg", 1, 1);
+        sfx_play("gimmicks/danger_siren.ogg", 1, 1);
+    }
+    if (ev & EV_FGHOST) sfx_play("menu/pthru_start.ogg", 1, 1);
+    if (ev & EV_SHATTER) sfx_play("gimmicks/prism_gate_shatter.ogg", 1, 1);
+    if (ev & EV_TOOPOOR) sfx_play("gimmicks/slots_bad.ogg", 1, 1);
     if (ev & EV_LIGHTS) sfx_play("gimmicks/dog_goal.ogg", 1, 1); // both lights-out levels use this sound
     if ((ev & EV_ASHBABY) && set.jumpscares != 2) {
         ashbaby_a = 254;
@@ -584,6 +639,10 @@ static void play_thought(int th) {
     case TH_CHUCKLE: thoughts_play("Chuckle"); break; // baddie.gd do_thought
     case TH_DOG: thoughts_play("Dog"); break;
     case TH_LIGHTS: thoughts_play("Lights"); break;
+    case TH_PORTAL: thoughts_play("Portal"); break;
+    case TH_HORSE: thoughts_play("Horse"); break;
+    case TH_METRONOME: thoughts_play("Metronome"); break;
+    case TH_SWIM: thoughts_play("Swim"); break;
     case TH_WIN: thoughts_play("Win"); thoughts_fallback("Win"); break;
     case TH_DEATH: thoughts_play("Death"); thoughts_fallback("Death"); break;
     case TH_BACKROOMS: thoughts_play("Backrooms"); thoughts_fallback("Backrooms"); break;
@@ -889,6 +948,32 @@ static void draw_dyn(int spr, vec2 world, float k, u32 tint) {
     C2D_DrawImage(img, &p, &t);
 }
 
+// a dyn picture stretched on each axis (the horse's squash, a horse goal's stretch)
+static void draw_dyn_ex(int spr, vec2 world, float kx, float ky, u32 tint, float angle) {
+    if (spr < 0 || spr >= level.ndspr || !dyn_sheet) return;
+    const DynSprite *d = &level.dspr[spr];
+    C2D_Image img = C2D_SpriteSheetGetImage(dyn_sheet, spr);
+    vec2 s = world_to_screen(world);
+    if (level.flags & LF_MIRROR) kx = -kx, angle = -angle;
+    C2D_DrawParams p = {{s.x, s.y, d->w * kx, d->h * ky}, {d->ax * kx, d->ay * ky}, ui_z, angle};
+    C2D_ImageTint t;
+    C2D_PlainImageTint(&t, tint, 1.0f);
+    C2D_DrawImage(img, &p, &t);
+}
+
+static void draw_dyn_rot(int spr, vec2 world, float k, u32 tint, float angle) {
+    if (spr < 0 || spr >= level.ndspr || !dyn_sheet) return;
+    const DynSprite *d = &level.dspr[spr];
+    C2D_Image img = C2D_SpriteSheetGetImage(dyn_sheet, spr);
+    vec2 s = world_to_screen(world);
+    float sx = (level.flags & LF_MIRROR) ? -k : k;
+    if (level.flags & LF_MIRROR) angle = -angle;
+    C2D_DrawParams p = {{s.x, s.y, d->w * sx, d->h * k}, {d->ax * sx, d->ay * k}, ui_z, angle};
+    C2D_ImageTint t;
+    C2D_PlainImageTint(&t, tint, 1.0f);
+    C2D_DrawImage(img, &p, &t);
+}
+
 // a switchable tile layer's picture, its anchor at the course origin
 static void draw_tiles(int t, float k) {
     if (!tile_sheet[t]) return;
@@ -940,8 +1025,9 @@ static bool course_under(float x, float y, float w, float h) {
 static void draw_course(void) {
     float k = course_scale();
     C2D_DrawRectSolid(0, 0, 0, BOT_W, SCR_H, C2D_Color32(0, 0, 0, 255));
-    C2D_SpriteSheet fu = game.lights_out && floor_u2 ? floor_u2 : floor_u;
-    C2D_SpriteSheet fo = game.lights_out && floor_u2 ? floor_o2 : floor_o;
+    bool alt = (game.lights_out || game.alt_floor) && floor_u2;
+    C2D_SpriteSheet fu = alt ? floor_u2 : floor_u;
+    C2D_SpriteSheet fo = alt ? floor_o2 : floor_o;
     if (fu) {
         C2D_Image img = C2D_SpriteSheetGetImage(fu, 0);
         float cw = 2 * level.bounds * k, s = cw / level.image_size;
@@ -954,8 +1040,16 @@ static void draw_course(void) {
     for (int t = 0; t < game.ntiles; t++)
         if (game.tiles[t].on && !game.tiles[t].over) draw_tiles(t, k);
     ui_z = 0.2f;
-    if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, lit(game.lights_goal), 0);
+    if (game.has_goal)
+        draw_sprite(goal_flag ? "goal" : "goal_hole", world_to_screen(game.goal_pos), k, 1, lit(game.lights_goal), 0);
     for (int d = 0; d < game.ndoggoals; d++) draw_dyn(game.doggoals[d].spr, game.doggoals[d].pos, k, WHITE);
+    for (int f = 0; f < game.nfakegoals; f++) // fake_goal.gd: the flag goes once it is hit
+        draw_dyn(game.fakegoals[f].taken ? game.fakegoals[f].spr2 : game.fakegoals[f].spr, game.fakegoals[f].pos, k, WHITE);
+    for (int p = 0; p < game.nportals; p++) { // portal.gd: turning while linked, grey when not
+        bool linked = game.portals[p].target >= 0;
+        draw_dyn_rot(game.portals[p].spr, game.portals[p].pos, k, linked ? WHITE : C2D_Color32f(0.5f, 0.5f, 0.5f, 1),
+                     linked ? game.portal_rot : 0);
+    }
     ui_z = 0.22f; // jump pads, spawner doors
     for (int i = 0; i < game.npads; i++) draw_dyn(game.pads[i].spr, game.pads[i].pos, k, WHITE);
     for (int i = 0; i < game.nspawners; i++)
@@ -990,6 +1084,16 @@ static void draw_course(void) {
             draw_dyn(b->type == OBJ_SWITCH && game.switch_state == 1 && b->spr2 >= 0 ? b->spr2 : b->spr, b->pos, k, WHITE);
             if (b->type == OBJ_KEYDOOR && b->lock_a > 0.01f)
                 draw_dyn(b->spr2, b->pos, k, C2D_Color32f(1, 1, 1, b->lock_a));
+            if (b->type == OBJ_PRISMGATE) { // PrismLock/TotalPrisms: 22 px, outlined, bulging when too poor
+                char num[12];
+                snprintf(num, sizeof(num), "%d", b->prisms);
+                vec2 p = world_to_screen(v2add(b->pos, v2(0, 5.5f)));
+                float bulge = b->bulge > 0 ? 1 + 0.5f * b->bulge : 1;
+                float z = ui_z;
+                ui_z = 0.31f;
+                text_ol(p.x, p.y - 11 * k * bulge, 22.0f * k * bulge / 30.0f, WHITE, C2D_AlignCenter, num);
+                ui_z = z;
+            }
         }
         ui_z = 0.33f;
         for (int i = 0; i < game.nkeys; i++) {
@@ -1002,9 +1106,37 @@ static void draw_course(void) {
         float sc = game.sprite_scale / 0.064f;
         draw_sprite("costume_canny", world_to_screen(game.pos), k, sc, lit(true), 0);
     }
+    // horse goals (par balls), mines, the horse
+    ui_z = 0.26f;
+    for (int i = 0; i < game.nhgoals; i++) {
+        const __typeof__(game.hgoals[0]) *hg = &game.hgoals[i];
+        if (hg->gone || !hg->active) continue;
+        draw_dyn_ex(hg->spr, hg->pos, k * hg->sx / 0.376471f, k * hg->sy / 0.367816f, WHITE, hg->rot);
+    }
+    for (int i = 0; i < game.nmines; i++) {
+        const __typeof__(game.mines[0]) *m = &game.mines[i];
+        if (!m->spent) draw_dyn(m->spr, m->pos, k, WHITE);
+        else if (m->boom > 0) { // the explosion: a quick orange flash
+            vec2 p = world_to_screen(m->pos);
+            C2D_DrawCircleSolid(p.x, p.y, 0.5f, 40 * k * (1.5f - m->boom), C2D_Color32f(1, 0.6f, 0.1f, m->boom));
+        }
+    }
+    if (game.horse.on) {
+        const __typeof__(game.horse) *h = &game.horse;
+        // shaking (sprite.offset, texture pixels at scale 0.25) and reddening (self_modulate.s) before a charge
+        float j = h->shaker / 10 * 0.25f * h->scale;
+        vec2 p = v2add(h->pos, v2(j * (2 * (rand() / (float)RAND_MAX) - 1), j * (2 * (rand() / (float)RAND_MAX) - 1)));
+        ui_z = 0.42f;
+        draw_dyn_ex(h->spr, p, k * h->sx / 0.25f, k * h->sy / 0.25f, C2D_Color32f(1, 1 - h->sat, 1 - h->sat, h->fade), 0);
+    }
     ui_z = 0.45f;
-    for (int i = 0; i < game.nghosts; i++)
-        if (game.ghosts[i].alive) draw_sprite("costume_uncanny", world_to_screen(game.ghosts[i].pos), k, 1, lit(true), 0);
+    for (int i = 0; i < game.nghosts; i++) // final_ghost.tscn: Sprite2D scale 0.172 (0.064 on a ghost), times its own
+        if (game.ghosts[i].alive) {
+            u32 c = lit(true);
+            if (game.ghosts[i].frozen) c = (c & 0x00FFFFFF) | 0x80000000; // metronome.gd: modulate.a = 0.5
+            draw_sprite("costume_uncanny", world_to_screen(game.ghosts[i].pos), k,
+                        game.ghosts[i].final ? game.ghosts[i].scale * 0.172f / 0.064f : 1, c, 0);
+        }
     if (game.hit_visible && game.pstate == PS_IDLE) {
         float c[4];
         game_aim_color(&game, c);
@@ -1062,6 +1194,18 @@ static void draw_course(void) {
     }
     // score popups (coins, blocks, doors, keys, skulls)
     ui_z = 0.75f;
+    for (int f = 0; f < game.nfakegoals; f++)
+        if (game.fakegoals[f].popup > 0) popup_text(game.fakegoals[f].pos, game.fakegoals[f].score, game.fakegoals[f].popup);
+    for (int m = 0; m < game.nmetros; m++) // metronome.tscn Label: "Beat the beat!" for its first beats
+        if (game.metros[m].visual && game.metros[m].counted <= 6) {
+            ui_z = 0.76f;
+            text_ol(BOT_W / 2.0f, 200, 0.6f, WHITE, C2D_AlignCenter, "Beat the beat!");
+            break;
+        }
+    if (game.nuke_flash > 0) { // NukeExplosions: the course lights up and fades
+        ui_z = 0.76f;
+        C2D_DrawRectSolid(0, 0, ui_z, BOT_W, SCR_H, C2D_Color32f(1, 0.85f, 0.5f, 0.6f * game.nuke_flash));
+    }
     for (int c = 0; c < game.nscoins; c++) // smiley_coin.gd: how many of the ring's coins so far
         if (game.scoins[c].popup > 0) popup_text(game.scoins[c].pos, game.scoins[c].count, game.scoins[c].popup);
     for (int i = 0; i < game.ncoins; i++)
@@ -1138,15 +1282,29 @@ static void draw_displayer(void) {
     else draw_sprite("costume_canny", v2(DCX - 1, DCY - 33), 1.6f, 1, WHITE, 0);
     ui_z = 0.3f;
     draw_hud("displayer", DCX, DCY, 1, WHITE);
-    // the Thinker: Canny next to the computer
+    // the Thinker: Canny next to the computer (gone on a final_ghost_level)
     ui_z = 0.32f;
-    draw_sprite("costume_canny", v2(170, 204), 1.7f, 1, WHITE, 0);
+    if (!((state == ST_PLAY || state == ST_PAUSE) && (level.flags & LF_FINAL_GHOST)))
+        draw_sprite("costume_canny", v2(170, 204), 1.7f, 1, WHITE, 0);
+}
+
+static void draw_horse_meter(void) {
+    if (!game.horse.start_health || (!game.horse.on && game.victory)) return;
+    float x = 10, y = 214, w = 160, h = 14;
+    float f = (float)game.horse.health / game.horse.start_health;
+    ui_z = 0.55f;
+    C2D_DrawRectSolid(x - 2, y - 2, ui_z, w + 4, h + 4, C2D_Color32(0, 0, 0, 255));
+    C2D_DrawRectSolid(x, y, ui_z, w, h, C2D_Color32(60, 20, 20, 255));
+    C2D_DrawRectSolid(x, y, ui_z, w * f, h, C2D_Color32(230, 40, 40, 255));
+    for (int i = 1; i < game.horse.start_health; i++)
+        C2D_DrawRectSolid(x + w * i / game.horse.start_health - 1, y, ui_z, 2, h, C2D_Color32(0, 0, 0, 200));
 }
 
 static void draw_top_hud(void) {
     char b[192], v[32], ms[8];
     draw_top_bg();
     draw_displayer();
+    draw_horse_meter();
     ui_z = 0.5f;
     if (!(level.flags & LF_HIDE_SCORING)) {
         char key[48];
@@ -1312,10 +1470,35 @@ static const u32 PEAKED = 0xFF5AF1FF;             // peaked_modulate (1, 0.946, 
 
 static int sel_rows(void) { return (wcount[sel_world] + GRID_COLS - 1) / GRID_COLS; }
 
+// a level's ID (level.gd ID): "w-n", World 6's are "P-n"
+static void level_name(char *b, size_t n, int w, int i) {
+    if (w == 6) snprintf(b, n, "P-%d", i + 1);
+    else snprintf(b, n, "%d-%d", w, i + 1);
+}
+
 static int level_rank(int w, int i) {
-    char key[32];
-    snprintf(key, sizeof(key), "%d-%d_rank", w, i + 1);
+    char key[32], id[16];
+    level_name(id, sizeof(id), w, i);
+    snprintf(key, sizeof(key), "%s_rank", id);
     return cfg_get_int(savedata, "LEVELS", key, -1);
+}
+
+// ---------------------------------------------------------------- minigames
+// minigame_menu.tscn: Bort Bash unlocks with 3-18 (its unlocks list), Meowls. with 1-18
+static const char *const MG_NAME_KEY[NMINIGAMES] = {"MINIGAME_Bart"};
+static bool minigame_unlocked(int which) {
+    switch (which) {
+    case MG_BORT: return level_rank(3, 17) >= 0;
+    }
+    return false;
+}
+
+static void draw_minigame_rows(void) {
+    for (int i = 0; i < NMINIGAMES; i++) {
+        bool open = minigame_unlocked(i);
+        ui_z = 0.5f;
+        button(GRID_X, GRID_Y + i * 44, GRID_COLS * CELL - 4, 38, open ? tr(MG_NAME_KEY[i]) : "? ? ?", i == sel_cursor);
+    }
 }
 
 static void draw_select(void) {
@@ -1325,11 +1508,13 @@ static void draw_select(void) {
     cur_font = font_ui;
     ol_color = BLUE;
     snprintf(key, sizeof(key), "GAME_World%d", sel_world);
-    text_ol(GRID_X + GRID_COLS * CELL / 2, 6, 0.62f, WHITE, C2D_AlignCenter, tr(key));
+    text_ol(GRID_X + GRID_COLS * CELL / 2, 6, 0.62f, WHITE, C2D_AlignCenter,
+            sel_world == MG_WORLD ? tr("MENU_Minigames") : tr(key));
     ol_color = BLACK;
     button(232, 4, 84, 28, tr("MENU_Settings"), false);
     // the grid
-    int n = wcount[sel_world];
+    int n = sel_world == MG_WORLD ? 0 : wcount[sel_world];
+    if (sel_world == MG_WORLD) draw_minigame_rows();
     for (int r = 0; r < GRID_ROWS; r++)
         for (int c = 0; c < GRID_COLS; c++) {
             int i = (sel_scroll + r) * GRID_COLS + c;
@@ -1340,7 +1525,7 @@ static void draw_select(void) {
             int rk = level_rank(sel_world, i);
             ui_z = 0.52f;
             cur_font = font_square;
-            snprintf(b, sizeof(b), "%d-%d", sel_world, i + 1);
+            level_name(b, sizeof(b), sel_world, i);
             text_ol(x + (CELL - 4) / 2, y + 7, 0.42f, rk == 5 ? PEAKED : grey(i == sel_cursor ? 0.95f : 0.875f),
                     C2D_AlignCenter, b);
             cur_font = font_ui;
@@ -1373,15 +1558,39 @@ static void draw_select(void) {
     text_ol(GO_X, GO_Y - 0.6f * lf_sys * 0.5f - 2, 0.6f, WHITE, C2D_AlignCenter, "GO!");
 }
 
+static void draw_minigame_top(void) {
+    char b[96];
+    ui_z = 0.5f;
+    cur_font = font_ui;
+    ol_color = BLUE;
+    text_ol(8, 76, 0.5f, WHITE, 0, tr("MENU_Minigames"));
+    bool open = minigame_unlocked(sel_cursor);
+    text_ol(8, 100, 0.55f, WHITE, 0, open ? tr(MG_NAME_KEY[sel_cursor]) : "? ? ?");
+    if (sel_cursor == MG_BORT) {
+        if (open) {
+            text_ol_wrap(8, 126, 0.45f, WHITE, 0, 200, tr("MINIGAME_Bart_Prompt"));
+            snprintf(b, sizeof(b), "Best Score: %d", cfg_get_int(savedata, "MINIGAMES", "bort_score", 0));
+            text_ol(8, 164, 0.45f, WHITE, 0, b);
+        } else {
+            text_ol_wrap(8, 126, 0.45f, grey(0.8f), 0, 200, "Clear 3-18 to unlock.");
+        }
+    }
+    ol_color = BLACK;
+}
+
 static void draw_select_top(void) {
     char b[160], id[16], key[48], v[32], ms[8];
     draw_top_bg();
     draw_displayer();
+    if (sel_world == MG_WORLD) {
+        draw_minigame_top();
+        return;
+    }
     ui_z = 0.5f;
     cur_font = font_ui;
     ol_color = BLUE;
     text_ol(8, 76, 0.5f, WHITE, 0, tr("MENU_SelectedLevel"));
-    snprintf(id, sizeof(id), "%d-%d", sel_world, sel_cursor + 1);
+    level_name(id, sizeof(id), sel_world, sel_cursor);
     snprintf(key, sizeof(key), "GAME_Level%s", id);
     snprintf(b, sizeof(b), "%s\n%s", id, tr(key));
     text_ol_wrap(8, 96, 0.5f, WHITE, 0, 200, b);
@@ -1413,13 +1622,173 @@ static void draw_select_top(void) {
 #define PAUSE_H 32.0f
 #define PAUSE_STEP 36.0f
 
-static void draw_pause(void) {
+static void draw_pause_items(const char *const *items, int n) {
     C2D_DrawRectSolid(0, 0, 0.9f, BOT_W, SCR_H, C2D_Color32f(0, 0, 0, 0.39f));
     C2D_DrawRectSolid(0, 0, 0.9f, BOT_W, SCR_H, C2D_Color32f(0.23f, 0, 0, 0.39f));
     ui_z = 0.92f;
     draw_hud("paused", 160, 46, 1, WHITE);
+    for (int i = 0; i < n; i++) button(PAUSE_X, PAUSE_Y + i * PAUSE_STEP, PAUSE_W, PAUSE_H, items[i], i == pause_cursor);
+}
+
+static void draw_pause(void) {
     const char *items[4] = {tr("MENU_PauseResume"), "Restart Level", tr("MENU_Settings"), tr("MENU_PauseQLevel")};
-    for (int i = 0; i < 4; i++) button(PAUSE_X, PAUSE_Y + i * PAUSE_STEP, PAUSE_W, PAUSE_H, items[i], i == pause_cursor);
+    draw_pause_items(items, 4);
+}
+
+// ---------------------------------------------------------------- Bort Bash
+// The cage (x 256..768, y 64..512 in the original) fills the bottom screen's height; the HUD labels
+// go on the top screen.
+#define BK (240.0f / 448)
+#define BOX ((BOT_W - 512 * BK) / 2)
+static BortGame bort;
+static C2D_SpriteSheet bort_sheet, bort_bg;
+static int bort_spr[BORT_HUES][2], boom_spr[BORT_BOOM_FRAMES], bortrank_spr[7];
+static bool bort_paused;
+static int bort_over_t, bort_best;
+#define BORT_OK_X 66.0f
+#define BORT_BACK_X 170.0f
+#define BORT_BTN_Y 184.0f
+
+static vec2 bort_screen(float x, float y) { return v2(BOX + (x - BORT_X0) * BK, (y - BORT_Y0) * BK); }
+
+static void start_minigame(int which) {
+    (void)which;
+    unload_level();
+    if (!bort_sheet) {
+        load_sheet(&bort_sheet, dp("gfx/mg_bort.t3x"), dp("gfx/mg_bort.txt"));
+        bort_bg = C2D_SpriteSheetLoad(dp("gfx/mg_bort_bg.t3x"));
+        char n[32];
+        for (int h = 0; h < BORT_HUES; h++)
+            for (int f = 0; f < 2; f++) snprintf(n, sizeof(n), "bort_%d_%d", h, f), bort_spr[h][f] = spr_find(n);
+        for (int f = 0; f < BORT_BOOM_FRAMES; f++) snprintf(n, sizeof(n), "boom_%d", f), boom_spr[f] = spr_find(n);
+        for (int f = 0; f < 7; f++) snprintf(n, sizeof(n), "bortrank_%d", f), bortrank_spr[f] = spr_find(n);
+    }
+    bort_start(&bort, (u32)osGetTime() ^ (u32)svcGetSystemTick());
+    bort_paused = false;
+    bort_over_t = 0;
+    bort_best = cfg_get_int(savedata, "MINIGAMES", "bort_score", 0);
+    music_play(1);
+    state = ST_BORT;
+}
+
+static void bort_events(int ev) {
+    if (ev & BEV_OW) sfx_play("minigame/bart_ow.ogg", 1, 1);
+    if (ev & BEV_CONGRATS) sfx_play("minigame/bart_congrats.ogg", 1, 1);
+    if (ev & BEV_MUSIC) music_play(30);
+    if (ev & BEV_LOSE) {
+        music_play(-1);
+        sfx_play("gimmicks/slots_bad.ogg", 1, 1);
+        if (bort.score > bort_best) {
+            bort_best = bort.score;
+            cfg_set_int(savedata, "MINIGAMES", "bort_score", bort_best);
+            cfg_write_later(savedata);
+        }
+    }
+}
+
+static void bort_input(u32 kd, bool tdown, vec2 touch) {
+    if (bort_paused) {
+        int pick = -1;
+        if (kd & KEY_DOWN) pause_cursor = (pause_cursor + 1) % 3;
+        if (kd & KEY_UP) pause_cursor = (pause_cursor + 2) % 3;
+        if (kd & KEY_A) pick = pause_cursor;
+        if (kd & (KEY_START | KEY_B)) pick = 0;
+        if (tdown)
+            for (int i = 0; i < 3; i++)
+                if (tap_box(touch, PAUSE_X, PAUSE_Y + i * PAUSE_STEP, PAUSE_W, PAUSE_H)) pick = i;
+        if (pick == 0) bort_paused = false;
+        else if (pick == 1) go(TR_MINIGAME, MG_BORT, 0);
+        else if (pick == 2) go(TR_SELECT, 0, 0);
+        return;
+    }
+    if ((kd & KEY_START) && bort.mode != BORT_OVER) {
+        bort_paused = true;
+        pause_cursor = 0;
+        sfx_play("player/grab.ogg", 1, 1);
+        return;
+    }
+    bort_tick(&bort);
+    int ev = bort.events;
+    bort.events = 0;
+    switch (bort.mode) {
+    case BORT_READY:
+        if ((kd & KEY_A) || (tdown && tap_box(touch, 120, 130, 80, 30))) bort_go(&bort);
+        if (kd & KEY_B) go(TR_SELECT, 0, 0);
+        break;
+    case BORT_PLAYING:
+    case BORT_CLEARED:
+        if (tdown && touch.x >= BOX && touch.x < BOT_W - BOX)
+            bort_tap(&bort, (touch.x - BOX) / BK + BORT_X0, touch.y / BK + BORT_Y0);
+        break;
+    case BORT_OVER:
+        if (++bort_over_t < 40) break; // the sting plays before a stray tap can restart
+        if ((kd & KEY_A) || (tdown && tap_box(touch, BORT_OK_X, BORT_BTN_Y, 84, 30))) go(TR_MINIGAME, MG_BORT, 0);
+        else if ((kd & KEY_B) || (tdown && tap_box(touch, BORT_BACK_X, BORT_BTN_Y, 84, 30))) go(TR_SELECT, 0, 0);
+        break;
+    }
+    bort_events(ev | bort.events);
+    bort.events = 0;
+}
+
+static void draw_bort(void) {
+    C2D_DrawRectSolid(0, 0, 0.05f, BOT_W, SCR_H, C2D_Color32(20, 12, 28, 255));
+    if (bort_bg) C2D_DrawImageAt(C2D_SpriteSheetGetImage(bort_bg, 0), BOX, 0, 0.1f, NULL, 512 * BK / 256, SCR_H / 256.0f);
+    ui_z = 0.5f;
+    for (int i = 0; i < BORT_MAX; i++) {
+        const Bort *b = &bort.b[i];
+        if (!b->on) continue;
+        int s = b->bashed ? boom_spr[b->boom / 2 < BORT_BOOM_FRAMES ? b->boom / 2 : BORT_BOOM_FRAMES - 1]
+                          : bort_spr[b->hue][b->frame];
+        if (s >= 0) draw_spr(s, bort_screen(b->x, b->y), sprinfo[s].ux * BK, sprinfo[s].uy * BK, WHITE, 0);
+        else C2D_DrawRectSolid(bort_screen(b->x, b->y).x - 6, bort_screen(b->x, b->y).y - 9, 0.5f, 12, 18,
+                               b->bashed ? C2D_Color32(255, 160, 0, 255) : C2D_Color32(255, 220, 0, 255));
+    }
+    cur_font = font_ui;
+    if (bort.mode == BORT_READY) { // clickallbarts: the prompt and its OK button
+        ui_z = 0.8f;
+        C2D_DrawRectSolid(70, 76, 0.8f, 180, 96, C2D_Color32f(0, 0, 0, 0.72f));
+        ui_z = 0.82f;
+        text_ol(160, 92, 0.5f, WHITE, C2D_AlignCenter, tr("MINIGAME_Bart_Prompt"));
+        button(120, 130, 80, 30, "OK", true);
+    } else if (bort.mode == BORT_OVER) { // GameOver
+        ui_z = 0.8f;
+        C2D_DrawRectSolid(36, 16, 0.8f, 248, 208, C2D_Color32f(0, 0, 0, 0.73f));
+        ui_z = 0.82f;
+        text_ol(160, 24, 0.6f, WHITE, C2D_AlignCenter, tr("MINIGAME_Bart_Gover"));
+        text_ol(116, 58, 0.45f, WHITE, C2D_AlignCenter, tr("MINIGAME_Bart_Status"));
+        int rs = bortrank_spr[bort.rank];
+        if (rs >= 0) draw_spr(rs, v2(210, 100), 0.85f, 0.85f, WHITE, 0);
+        text_ol_wrap(48, 84, 0.4f, grey(0.9f), 0, 120, tr("MINIGAME_Bart_Retry"));
+        if (bort_over_t >= 40) {
+            button(BORT_OK_X, BORT_BTN_Y, 84, 30, "OK", true);
+            button(BORT_BACK_X, BORT_BTN_Y, 84, 30, "Back", false);
+        }
+    }
+    if (bort_paused) {
+        const char *items[3] = {tr("MENU_PauseResume"), "Restart", "Back to Minigames"};
+        draw_pause_items(items, 3);
+    }
+}
+
+static void draw_bort_top(void) {
+    char b[48];
+    draw_top_bg();
+    ui_z = 0.5f;
+    cur_font = font_ui;
+    ol_color = BLUE;
+    // right of the top background's logo
+    text_ol(290, 14, 0.7f, WHITE, C2D_AlignCenter, tr("MINIGAME_Bart"));
+    snprintf(b, sizeof(b), "%d", bort_seconds(&bort));
+    text_ol(290, 46, 1.4f, WHITE, C2D_AlignCenter, b); // HUD/Timer: Impact 40, blue shadow
+    ol_color = BLACK;
+    snprintf(b, sizeof(b), "ROUND %d", bort.round);
+    text_ol(24, 112, 0.6f, C2D_Color32f(1, 0.5f, 0.625f, 1), 0, b);
+    snprintf(b, sizeof(b), "Borts Left: %d", bort.left);
+    text_ol(24, 140, 0.6f, C2D_Color32f(1, 1, 0.35f, 1), 0, b);
+    snprintf(b, sizeof(b), "Score: %d", bort.score);
+    text_ol(24, 168, 0.6f, C2D_Color32f(0.4f, 0.83f, 1, 1), 0, b);
+    snprintf(b, sizeof(b), "Best: %d", bort_best);
+    text_ol(24, 200, 0.45f, grey(0.85f), 0, b);
 }
 // ---------------------------------------------------------------- settings menu
 enum { SET_SENS, SET_INVERT, SET_BUFFER, SET_DRAG, SET_ZOOM, SET_LEFT, SET_THOUGHTS, SET_SCARES, SET_FPS,
@@ -1860,7 +2229,12 @@ static const char *const PRELOAD[] = {
     "gimmicks/slots_bad.ogg", "gimmicks/slots_dead.ogg", "gimmicks/slots_fail.ogg", "ghost/defaultJumpscare.ogg", "game/deathOB.ogg",
     "game/levelStart.ogg", "game/levelWin.ogg", "game/resultsDrumroll.ogg", "game/rankAtrocious.ogg",
     "game/rankErm.ogg", "game/rankOK.ogg", "game/rankPeak.ogg", "game/rankSwag.ogg",
-    "gimmicks/screamsOfDeadPeople.ogg", "minigame/meowl_die.ogg"};
+    "gimmicks/screamsOfDeadPeople.ogg", "minigame/meowl_die.ogg",
+    "gimmicks/portal.ogg", "gimmicks/explosion1.ogg", "gimmicks/fake_goal_bump.ogg", "gimmicks/danger_siren.ogg",
+    "menu/pthru_start.ogg", "gimmicks/prism_gate_shatter.ogg", "gimmicks/boss_chargeup.ogg",
+    "gimmicks/boss_charge.ogg", "gimmicks/boss_bump.ogg", "gimmicks/boss_hurt1.ogg", "gimmicks/boss_hurt2.ogg",
+    "gimmicks/boss_hurt3.ogg", "game/resultsBang.ogg", "gimmicks/bossgoal_launch.ogg", "gimmicks/metronome.ogg",
+    "gimmicks/rhythm_block.ogg", "gimmicks/polyrhythm_block.ogg"};
 
 // ---------------------------------------------------------------- loading behind the intro
 // The intro needs only its own art, the sprites (Canny), the top background and the font. Everything
@@ -1995,13 +2369,18 @@ int main(void) {
                 go(TR_INTRO_DONE, 0, 0);
                 tr_out = tr_in = 1.0f / 60 / 0.5f; // half a second out of the credits and into the game
             }
+        } else if (state == ST_BORT) {
+            bort_input(kd, tdown, touch);
         } else if (state == ST_SELECT) {
             int n = wcount[sel_world];
+            bool mg = sel_world == MG_WORLD;
             int dw = (kd & KEY_R) ? 1 : (kd & KEY_L) ? -1 : 0;
             if (kd & KEY_RIGHT) sel_cursor = (sel_cursor + 1) % n;
             if (kd & KEY_LEFT) sel_cursor = (sel_cursor + n - 1) % n;
-            if (kd & KEY_DOWN) sel_cursor = sel_cursor + GRID_COLS < n ? sel_cursor + GRID_COLS : sel_cursor % GRID_COLS;
-            if (kd & KEY_UP) {
+            if (mg && (kd & KEY_DOWN)) sel_cursor = (sel_cursor + 1) % n;
+            else if (mg && (kd & KEY_UP)) sel_cursor = (sel_cursor + n - 1) % n;
+            else if (kd & KEY_DOWN) sel_cursor = sel_cursor + GRID_COLS < n ? sel_cursor + GRID_COLS : sel_cursor % GRID_COLS;
+            else if (kd & KEY_UP) {
                 if (sel_cursor >= GRID_COLS) sel_cursor -= GRID_COLS;
                 else {
                     int last = sel_cursor + (sel_rows() - 1) * GRID_COLS;
@@ -2026,6 +2405,13 @@ int main(void) {
                     int row = sel_cursor / GRID_COLS;
                     if (row < sel_scroll) sel_cursor += (sel_scroll - row) * GRID_COLS;
                     if (row >= sel_scroll + GRID_ROWS) sel_cursor -= (row - sel_scroll - GRID_ROWS + 1) * GRID_COLS;
+                } else if (mg) {
+                    for (int i = 0; i < n; i++)
+                        if (tap_box(touch, GRID_X, GRID_Y + i * 44, GRID_COLS * CELL - 4, 38)) {
+                            if (i == sel_cursor) play = true;
+                            sel_cursor = i;
+                            sfx_play("player/grab.ogg", 1, 1);
+                        }
                 } else
                     for (int r = 0; r < GRID_ROWS; r++)
                         for (int c = 0; c < GRID_COLS; c++) {
@@ -2047,7 +2433,10 @@ int main(void) {
                 sel_cursor = sel_scroll = 0;
                 play = false;
             }
-            if (play && state == ST_SELECT) go(TR_START, sel_world, sel_cursor);
+            if (play && state == ST_SELECT && sel_world == MG_WORLD) {
+                if (minigame_unlocked(sel_cursor)) go(TR_MINIGAME, sel_cursor, 0);
+                else sfx_play("gimmicks/slots_bad.ogg", 1, 1);
+            } else if (play && state == ST_SELECT) go(TR_START, sel_world, sel_cursor);
             if (state == ST_SELECT) {
                 int row = sel_cursor / GRID_COLS;
                 if (row < sel_scroll) sel_scroll = row;
@@ -2104,6 +2493,7 @@ int main(void) {
             in.restart_pressed = (kd & KEY_Y) || restart_btn;
             in.skip_down = (kh & KEY_X) || skip_btn;
             in.pause_pressed = (kd & KEY_START) || pause_btn;
+            in.beat = music_beat();
 
             if (game.victory) {
                 // results: tap to skip the count-up, then tap for the next level
@@ -2139,7 +2529,9 @@ int main(void) {
                 if (game.events & EV_WIN) {
                     char id[16];
                     snprintf(id, sizeof(id), "%s", level.id);
-                    record_result(id, game.final_score, game.time, game.rank, game.strokes);
+                    // pthru.gd: a level that hides its score counts as a P
+                    record_result(id, game.final_score, game.time,
+                                  (level.flags & LF_HIDE_SCORING) ? RANK_PEAK : game.rank, game.strokes);
                 }
                 if (game.progress == PROG_RESET || game.progress == PROG_WIN_RESET) go(TR_START, cur_world, cur_level);
                 else if (game.progress == PROG_SKIP) go(TR_NEXT, 0, 0);
@@ -2182,6 +2574,7 @@ int main(void) {
         ui_z = 0.5f;
         if (state == ST_INTRO) draw_intro_top();
         else if (state == ST_SELECT) draw_select_top();
+        else if (state == ST_BORT) draw_bort_top();
         else if (state == ST_SETTINGS) draw_settings_top();
         else if (game.victory && win_t > 20) draw_results_top();
         else draw_top_hud();
@@ -2194,6 +2587,7 @@ int main(void) {
         ui_z = 0.5f;
         if (state == ST_INTRO) draw_intro();
         else if (state == ST_SELECT) draw_select();
+        else if (state == ST_BORT) draw_bort();
         else if (state == ST_SETTINGS && settings_back == ST_SELECT) draw_settings();
         else {
             draw_course();
@@ -2240,7 +2634,7 @@ int main(void) {
         PROF_MARK("~frame end");
 #if UCG_PROFILE
         {
-            static const char *SN[] = {"select", "play", "pause", "settings", "intro"};
+            static const char *SN[] = {"select", "play", "pause", "settings", "intro", "bort"};
             char what[48];
             snprintf(what, sizeof(what), "%s %s%s", SN[state], state == ST_SELECT ? "" : level.id,
                      game.victory ? " won" : game.lose ? " lost" : "");

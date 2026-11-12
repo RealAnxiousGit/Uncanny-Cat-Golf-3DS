@@ -24,7 +24,9 @@
 #define OB_RADIUS 24
 #define SKIPCOUNT 30
 
-enum { PS_SPAWN, PS_IDLE, PS_MOVING, PS_WIN, PS_LOSE, PS_ATTRACT, PS_JUMP };
+enum { PS_SPAWN, PS_IDLE, PS_MOVING, PS_WIN, PS_LOSE, PS_ATTRACT, PS_JUMP,
+       PS_CUSTOM,   // PCustom: held still, hitbox off (the horse's defeat)
+       PS_WINFAKE }; // PWinFake: 5-3's fake stage clear
 enum { DEATH_NORMAL, DEATH_OB, DEATH_BACKROOMS, DEATH_WALL, DEATH_HORSE, DEATH_WATER };
 enum { MODE_NORMAL, MODE_ENDLESS, MODE_DEMO };
 enum { RANK_UNCANNY, RANK_ATROCIOUS, RANK_STINKY, RANK_OK, RANK_SWAG, RANK_PEAK };
@@ -51,16 +53,38 @@ enum {
 #define EV_RINGFAIL (1ull << 33)
 #define EV_LIGHTS (1ull << 34)
 #define EV_ASHBABY (1ull << 35)
+// World 4
+#define EV_PORTAL (1ull << 36)
+#define EV_NUKE (1ull << 37)
+#define EV_FAKEGOAL (1ull << 38)
+#define EV_FAKEALT (1ull << 39)   // the fake goal's own sounds_to_play
+#define EV_FGHOST (1ull << 40)    // final_ghost.gd sfx_activate
+#define EV_SHATTER (1ull << 41)   // prism_gate.gd
+#define EV_TOOPOOR (1ull << 42)
+// World 5: horse_boss.gd, horse_goal.gd, land_mine.gd
+#define EV_HCHARGEUP (1ull << 43)
+#define EV_HCHARGE (1ull << 44)
+#define EV_HBOUNCE (1ull << 45)
+#define EV_HHURT (1ull << 46)
+#define EV_HBOOM (1ull << 47)     // horse_explosion_fx (resultsBang)
+#define EV_HBOOMQ (1ull << 48)    // the same, quiet
+#define EV_HLAUNCH (1ull << 49)
+#define EV_HDIE (1ull << 50)
+#define EV_MINE (1ull << 51)
+#define EV_MUTE (1ull << 52)      // the music stops
+#define EV_METRO_BEAT (1ull << 53) // metronome.gd _beat_sound (pitch metro_beat_pitch)
+#define EV_METRO_TRIG (1ull << 54) // a metronome's trigger sound (metro_trig: which ones)
 
 // Thought animations the top screen should show (thought_displayer categories)
 enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL, TH_CAR, TH_JUMP, TH_POLICE,
-       TH_CHUCKLE, TH_DOG, TH_LIGHTS };
+       TH_CHUCKLE, TH_DOG, TH_LIGHTS, TH_PORTAL, TH_HORSE, TH_METRONOME, TH_SWIM };
 
 typedef struct {
     // positions are in the original's viewport pixels: the course is 0..512 on both axes
     vec2 mouse;
     bool click_pressed, click_down, click_released;
     bool restart_pressed, skip_down, pause_pressed;
+    int beat;            // the music's beat number (metronome.gd), -1 if unknown
 } GameInput;
 
 typedef struct {
@@ -87,6 +111,12 @@ enum { SLOT_DEFAULT, SLOT_JACKPOT, SLOT_HAPPY, SLOT_OK, SLOT_QUESTION, SLOT_PHON
 #define RING_WIN_TIME 1.826f
 #define RING_FAIL_TIME 1.371f
 #define MAX_KEYS 12
+#define MAX_PORTALS 8
+#define MAX_HGOALS 8
+#define MAX_METROS 4
+#define MAX_MINES 16
+enum { HORSE_NORMAL, HORSE_LOSS, HORSE_WIN, HORSE_DEFEAT };
+#define MAX_FAKEGOALS 16
 #define MAX_ZONES 16
 
 // A block, key door or skull: a dynamic physics shape (index lv.nshapes + i)
@@ -108,6 +138,9 @@ typedef struct {
     int goal;                  // the dog goal it went into
     float dscale;              // dog_golf.gd sprite.scale (0.064, shrinking once it wins)
     float lock_a;      // the door's lock, fading while a matching key is held
+    int prisms;        // prism_gate.gd prism_number
+    bool passable, touch; // enough prisms (no collision); the cat in its break hitbox last tick
+    float bulge;       // the lock's "too poor" bulge (1 -> 0)
     int popup_score;
     float popup;
 } Body;
@@ -126,6 +159,8 @@ typedef struct {
     float power_sensitivity;
     bool invert_shot;
     bool buffer_shot;
+    int total_prisms; // the playthrough's prisms (pthru total_prisms: the best ranks added up)
+    bool can_swim;    // pthru can_swim: the golden tee at 5-18 gives it, so every P level has it
 } GameSettings;
 
 typedef struct {
@@ -153,13 +188,48 @@ typedef struct {
 
     // things in the level
     int nghosts;
-    struct { vec2 pos, vel; bool alive, graze; } ghosts[MAX_GHOSTS];
+    // final_ghost.gd: a ghost that waits (inactive) until a fake goal wakes it, at its node's scale
+    struct { vec2 pos, vel; bool alive, graze, inactive, final; float scale, hit;
+             int met, mslot; bool frozen; } ghosts[MAX_GHOSTS]; // metronome.gd: frozen and see-through when off
     bool has_goal;
     vec2 goal_pos;
-    float goal_r;
+    float goal_r, goal_ry;
     int ncoins;
     // coins, and World 2's speed / stop tokens (collectible.gd with does_speed; spr >= 0)
-    struct { vec2 pos; float r; bool taken; int score, mult, multval; float popup; bool does_speed; float set_speed; int spr; } coins[MAX_COINS];
+    struct { vec2 pos; float r; bool taken; int score, mult, multval; float popup; bool does_speed; float set_speed; int spr;
+             bool nuke, nuke_spawners; } coins[MAX_COINS];
+    float nuke_flash;         // nuke.gd NukeExplosions: a flash over the course (1 -> 0)
+    // portal.gd (and player.gd portal_sick)
+    int nportals;
+    struct { vec2 pos, half; int target, spr; bool in; } portals[MAX_PORTALS];
+    bool portal_sick;
+    int portal_sick_timer;
+    float portal_rot;         // graphic.rotation += 0.1 a frame (every linked portal turns alike)
+    // fake_goal.gd
+    int nfakegoals;
+    struct { vec2 pos; float r; int score, spr, spr2, group; bool ghost, alt, taken; float popup; } fakegoals[MAX_FAKEGOALS];
+    bool alt_floor;           // the fake goal's objects_to_show and new_color (<id>_u2)
+    // horse_boss.gd (boss_level.gd: no goal; the level is won when the beaten horse flies off the top)
+    struct {
+        bool on;
+        vec2 pos, vel, dir;
+        float scale, base_speed, sx, sy, sat, shaker, fade;
+        int health, start_health, attack_time, attack_timer, target_delay, mode, spr, defeat_t;
+        bool targetted, end_of_life;
+    } horse;
+    int nhgoals; // horse_goal.gd
+    struct { vec2 pos, vel; float r, scale, rot, sx, sy; int next, spr; bool active, charging, gone, pin, hin; } hgoals[MAX_HGOALS];
+    int nmines;  // land_mine.gd
+    struct { vec2 pos; float r; int spr; bool spent, hin; float boom; } mines[MAX_MINES];
+    // metronome.gd
+    int nmetros;
+    struct { int m, every, n, cur, counted, last, snd; float vol, pitch; bool visual, tile, started, swing; } metros[MAX_METROS];
+    unsigned metro_trig;
+    float metro_beat_pitch;
+    float anim_t;             // the level's autoplaying animations (lv.tracks), from the start
+    int wind_key;             // the wind key last applied (a discrete track sets the value once per key)
+    vec2 winfake_target;      // boss_appear_event.gd: where PWinFake drifts to
+    int winfake_count;
     int npads;    // jump_pad.gd
     struct { vec2 pos; float r, dir, speed_granted; int spr; bool in; } pads[MAX_PADS];
     int nspawners; // baddie_spawner.gd
