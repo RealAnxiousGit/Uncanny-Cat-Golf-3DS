@@ -7,6 +7,8 @@
 #include <string.h>
 #include <tremor/ivorbisfile.h>
 
+#include "data.h"
+
 #define SFX_CHANNELS 7      // ndsp channels 1..7; channel 0 is music
 #define MAX_SFX 160
 #define MUSIC_BUFS 3
@@ -47,7 +49,7 @@ static int q_head, q_tail;
 static volatile bool bg_on; // a worker is running; otherwise the game thread does the work
 
 static void load_track_index(void) {
-    FILE *f = fopen("romfs:/music/index.txt", "r");
+    FILE *f = fopen(dp("music/index.txt"), "r");
     if (!f) return;
     char line[160];
     while (fgets(line, sizeof(line), f) && ntracks < 32) {
@@ -104,12 +106,68 @@ static Sfx *find(const char *rel) {
     return s;
 }
 
+static Sfx *add_sound(const char *rel, int16_t *pcm, size_t bytes, int ch, int rate) {
+    DSP_FlushDataCache(pcm, bytes);
+    LightLock_Lock(&alock);
+    Sfx *s = find_locked(rel); // the other thread may have finished it meanwhile
+    if (s || nsfx >= MAX_SFX) {
+        linearFree(pcm);
+    } else {
+        s = &sfx[nsfx];
+        snprintf(s->name, sizeof(s->name), "%s", rel);
+        s->pcm = pcm;
+        s->channels = ch;
+        s->rate = rate;
+        s->frames = bytes / (ch * sizeof(int16_t));
+        nsfx++;
+    }
+    LightLock_Unlock(&alock);
+    return s;
+}
+
+// a plain 16-bit PCM .wav (the port's own sounds, like the Oops screen's)
+static Sfx *load_wav(const char *rel, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    unsigned char h[12], c[8];
+    int ch = 1, rate = 22050, bits = 16;
+    Sfx *s = NULL;
+    if (fread(h, 1, 12, f) == 12 && !memcmp(h, "RIFF", 4) && !memcmp(h + 8, "WAVE", 4)) {
+        while (fread(c, 1, 8, f) == 8) {
+            uint32_t len = c[4] | c[5] << 8 | c[6] << 16 | (uint32_t)c[7] << 24;
+            if (!memcmp(c, "fmt ", 4)) {
+                unsigned char fm[16];
+                if (len < 16 || fread(fm, 1, 16, f) != 16) break;
+                ch = fm[2] | fm[3] << 8;
+                rate = fm[4] | fm[5] << 8 | fm[6] << 16 | fm[7] << 24;
+                bits = fm[14] | fm[15] << 8;
+                fseek(f, len - 16 + (len & 1), SEEK_CUR);
+            } else if (!memcmp(c, "data", 4)) {
+                if (bits != 16 || ch < 1 || ch > 2) break;
+                int16_t *pcm = linearAlloc(len + 8);
+                if (!pcm) break;
+                size_t got = fread(pcm, 1, len, f);
+                s = add_sound(rel, pcm, got, ch, rate);
+                break;
+            } else {
+                fseek(f, len + (len & 1), SEEK_CUR);
+            }
+        }
+    }
+    fclose(f);
+    return s;
+}
+
 // decodes outside the lock (the slow part), then adds the sound to the table
 static Sfx *find_or_load(const char *rel) {
     Sfx *have = find(rel);
     if (have) return have;
     char path[160];
-    snprintf(path, sizeof(path), "romfs:/sfx/%s", rel);
+    // a full path ("romfs:/port/...") is the port's own sound; anything else is one of the game's
+    if (strchr(rel, ':')) snprintf(path, sizeof(path), "%s", rel);
+    else snprintf(path, sizeof(path), "%s/sfx/%s", data_root(), rel);
+    size_t rl = strlen(rel);
+    if (rl > 4 && !strcmp(rel + rl - 4, ".wav")) return load_wav(rel, path);
     PROF_BEGIN("sound decode");
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -140,21 +198,7 @@ static Sfx *find_or_load(const char *rel) {
     }
     int rate = vi->rate;
     ov_clear(&vf); // closes f
-    DSP_FlushDataCache(pcm, got);
-    LightLock_Lock(&alock);
-    Sfx *s = find_locked(rel); // the other thread may have finished it meanwhile
-    if (s || nsfx >= MAX_SFX) {
-        linearFree(pcm);
-    } else {
-        s = &sfx[nsfx];
-        snprintf(s->name, sizeof(s->name), "%s", rel);
-        s->pcm = pcm;
-        s->channels = ch;
-        s->rate = rate;
-        s->frames = got / (ch * sizeof(int16_t));
-        nsfx++;
-    }
-    LightLock_Unlock(&alock);
+    Sfx *s = add_sound(rel, pcm, got, ch, rate);
     PROF_END();
     return s;
 }
@@ -241,7 +285,7 @@ void music_play(int id) {
         return;
     }
     char path[160];
-    snprintf(path, sizeof(path), "romfs:/music/%s", t->file);
+    snprintf(path, sizeof(path), "%s/music/%s", data_root(), t->file);
     FILE *f = fopen(path, "rb");
     if (!f) {
         LightLock_Unlock(&alock);

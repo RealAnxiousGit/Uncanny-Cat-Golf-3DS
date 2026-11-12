@@ -25,6 +25,7 @@ from PIL import Image  # noqa: E402
 import bake as B  # noqa: E402
 import godot  # noqa: E402
 import hud as HUD  # noqa: E402
+import credits as CR  # noqa: E402
 import levels as L  # noqa: E402
 import scene as S  # noqa: E402
 
@@ -51,8 +52,10 @@ def log(*a):
     print(*a, flush=True)
 
 
-def tex3ds(inputs, out, fmt, atlas=False):
-    cmd = [TEX3DS, "-f", fmt, "-z", "none", "-o", out]
+def tex3ds(inputs, out, fmt, atlas=False, z="none"):
+    # z="lz11" packs the file (lossless; citro2d unpacks it when loading). Level pictures use it:
+    # reading the file is most of a level's load time, and floor art packs to a fraction.
+    cmd = [TEX3DS, "-f", fmt, "-z", z, "-o", out]
     if atlas:
         cmd.append("--atlas")
     cmd += inputs
@@ -103,11 +106,11 @@ def convert_levels(project, tc, out, worlds, report):
             for suffix, fmt in (("_u", "rgb565"), ("_o", "rgba8")):
                 png = os.path.join(out_dir, name + suffix + ".png")
                 if os.path.exists(png):
-                    tex3ds([png], os.path.join(out_dir, name + suffix + ".t3x"), fmt)
+                    tex3ds([png], os.path.join(out_dir, name + suffix + ".t3x"), fmt, z="lz11")
                     if not KEEP_PNG:
                         os.remove(png)
             if info["dyn"]:
-                tex3ds(info["dyn"], os.path.join(out_dir, name + "_d.t3x"), "rgba8", atlas=True)
+                tex3ds(info["dyn"], os.path.join(out_dir, name + "_d.t3x"), "rgba8", atlas=True, z="lz11")
                 if not KEEP_PNG:
                     for fp in info["dyn"]:
                         os.remove(fp)
@@ -278,14 +281,49 @@ def convert_menu(project, out):
     tex3ds(files, os.path.join(gfx, "menu.t3x"), "rgba8", atlas=True)
     with open(os.path.join(gfx, "menu.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
+    made = set()
     for name, res, size in HUD.FONTS:
-        r = subprocess.run([MKBCFNT, "-s", str(size), "-o", os.path.join(gfx, name + ".bcfnt"), project.fs(res)],
-                           capture_output=True, text=True)
+        out_f = os.path.join(gfx, name + ".bcfnt")
+        if (res, size) in made:  # the same font again: the game falls back to ui.bcfnt
+            if os.path.exists(out_f):
+                os.remove(out_f)
+            continue
+        made.add((res, size))
+        r = subprocess.run([MKBCFNT, "-s", str(size), "-o", out_f, project.fs(res)], capture_output=True, text=True)
         if r.returncode:
             raise SystemExit("mkbcfnt failed for %s:\n%s%s" % (res, r.stdout, r.stderr))
     if not KEEP_PNG:
         shutil.rmtree(tmp)
     log("  menu: %d pieces, %d fonts" % (len(lines), len(HUD.FONTS)))
+
+
+# --- the port's own files: intro credits and the Oops screen -------------------
+
+def convert_port(out):
+    """romfs/port/: nothing from the game, so release builds keep it in the 3dsx/cia (build.sh LEAN=1)."""
+    port = os.path.join(out, "romfs", "port")
+    tmp = os.path.join(out, "tmp_port")
+    os.makedirs(port, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
+    for sheet, items in (("credits", CR.entries()), ("oops", CR.oops_entries())):
+        files, lines = [], []
+        for i, (name, img, anchor) in enumerate(items):
+            fp = os.path.join(tmp, "%s%02d_%s.png" % (sheet, i, name))
+            img.save(fp)
+            files.append(fp)
+            lines.append("%s %d %d %d %s %s 1 1" % (name, i, img.size[0], img.size[1],
+                                                   L._fmt(anchor[0]), L._fmt(anchor[1])))
+        tex3ds(files, os.path.join(port, sheet + ".t3x"), "rgba8", atlas=True, z="lz11")
+        with open(os.path.join(port, sheet + ".txt"), "w", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+    CR.sad_trombone(os.path.join(port, "oops.wav"))
+    for old in ("credits.t3x", "credits.txt"):  # where an earlier converter put the credits
+        fp = os.path.join(out, "romfs", "gfx", old)
+        if os.path.exists(fp):
+            os.remove(fp)
+    if not KEEP_PNG:
+        shutil.rmtree(tmp)
+    log("  port: intro credits, Oops screen")
 
 
 # --- audio ------------------------------------------------------------------
@@ -391,7 +429,7 @@ def main():
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--no-thoughts", action="store_true", help="skip the thoughts clips (slowest step)")
     ap.add_argument("--keep-png", action="store_true", help="keep baked PNGs next to the .t3x files")
-    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,hud,menu,thoughts,text,demos,audio")
+    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,hud,menu,port,thoughts,text,demos,audio")
     a = ap.parse_args()
     KEEP_PNG = a.keep_png
     only = {s.strip() for s in a.only.split(",") if s.strip()}
@@ -418,6 +456,9 @@ def main():
     if want("menu"):
         log("menu:")
         convert_menu(project, a.out)
+    if want("port"):
+        log("port:")
+        convert_port(a.out)
     if want("thoughts") and not a.no_thoughts:
         log("thoughts:")
         HUD.convert_thoughts(project, a.out, log, report)

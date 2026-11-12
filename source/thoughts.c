@@ -4,6 +4,7 @@
 // frames into a finished picture, and the game thread only copies that picture into a texture.
 #include "prof.h"
 #include "thoughts.h"
+#include "data.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -57,7 +58,7 @@ static u16 work_pix[PIX];
 // shared, under tlock
 static LightLock tlock;
 static volatile bool bg;
-static char req_path[96];
+static char req_path[160];
 static int req_gen, open_gen_pub, want_id[3] = {0, 0, 0}, ready_id[3] = {-1, -1, -1};
 static ClipInfo info_pub;
 static u16 ready_pix[PIX];
@@ -118,7 +119,7 @@ static bool clip_unpack(Clip *c, int frame) {
 
 // worker: open the clip asked for, or unpack the frame asked for into ready_pix
 bool thoughts_bg_step(void) {
-    char path[96];
+    char path[160];
     int gen, want[3];
     LightLock_Lock(&tlock);
     gen = req_gen;
@@ -200,7 +201,7 @@ void thoughts_init(void) {
             u32 r = y;
             tiled_off[y * FW + x] = ((r >> 3) * (TEX >> 3) + (x >> 3)) * 64 + morton(x & 7, r & 7);
         }
-    FILE *f = fopen("romfs:/thoughts/index.txt", "r");
+    FILE *f = fopen(dp("thoughts/index.txt"), "r");
     if (f) {
         char line[160];
         int cap = 0;
@@ -213,7 +214,7 @@ void thoughts_init(void) {
         }
         fclose(f);
     }
-    clip_open(&stat, "romfs:/thoughts/static.uth");
+    clip_open(&stat, dp("thoughts/static.uth"));
 }
 
 void thoughts_exit(void) {
@@ -246,8 +247,8 @@ void thoughts_play(const char *category) {
     int pick = rand() % n;
     for (int i = 0; i < nrefs; i++)
         if (!strcmp(refs[i].cat, category) && pick-- == 0) {
-            char path[96];
-            snprintf(path, sizeof(path), "romfs:/thoughts/%s/%s.uth", refs[i].cat, refs[i].name);
+            char path[160];
+            snprintf(path, sizeof(path), "%s/thoughts/%s/%s.uth", data_root(), refs[i].cat, refs[i].name);
             request_clip(path);
             cur_open = true; // until the worker says it could not open it
             break;

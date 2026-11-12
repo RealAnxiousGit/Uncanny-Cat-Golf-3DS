@@ -9,6 +9,7 @@
 
 #include "prof.h"
 #include "worker.h"
+#include "data.h"
 #include "audio.h"
 #include "game.h"
 #include "save.h"
@@ -23,10 +24,10 @@
 
 // ---------------------------------------------------------------- sprites
 typedef struct { char name[32]; C2D_SpriteSheet *sheet; int idx; float ax, ay, ux, uy; } SpriteInfo;
-#define MAX_SPR 160
+#define MAX_SPR 200
 static SpriteInfo sprinfo[MAX_SPR];
 static int nspr;
-static C2D_SpriteSheet sprites, hudsheet, top_bg, menusheet, settings_bg, jumpscare_sheet;
+static C2D_SpriteSheet sprites, hudsheet, top_bg, menusheet, settings_bg, jumpscare_sheet, creditsheet;
 
 static int spr_find(const char *name) {
     for (int i = 0; i < nspr; i++)
@@ -34,8 +35,19 @@ static int spr_find(const char *name) {
     return -1;
 }
 
+// a sprite sheet, from bytes the worker read ahead when there are some (then only the copy into a
+// texture happens here), else straight from the file
+static C2D_SpriteSheet sheet_load(const char *path) {
+    size_t n;
+    void *b = prefetch_take(path, &n);
+    if (!b) return C2D_SpriteSheetLoad(path);
+    C2D_SpriteSheet s = C2D_SpriteSheetLoadFromMem(b, n);
+    free(b);
+    return s;
+}
+
 static void load_sheet(C2D_SpriteSheet *sheet, const char *t3x, const char *txt) {
-    *sheet = C2D_SpriteSheetLoad(t3x);
+    *sheet = sheet_load(t3x);
     FILE *f = fopen(txt, "r");
     if (!f) return;
     char line[160];
@@ -70,7 +82,7 @@ static void lang_free(Lang *l) {
 static void lang_load(Lang *l, const char *code) {
     lang_free(l);
     char path[64];
-    snprintf(path, sizeof(path), "romfs:/lang/%s.txt", code);
+    snprintf(path, sizeof(path), "%s/lang/%s.txt", data_root(), code);
     FILE *f = fopen(path, "rb");
     if (!f) return;
     fseek(f, 0, SEEK_END);
@@ -150,7 +162,7 @@ static char wnames[NWORLDS][32][16];
 static int wcount[NWORLDS];
 
 static void load_level_index(void) {
-    FILE *f = fopen("romfs:/levels/index.txt", "r");
+    FILE *f = fopen(dp("levels/index.txt"), "r");
     if (!f) return;
     char line[2048];
     while (fgets(line, sizeof(line), f)) {
@@ -254,11 +266,11 @@ static void record_result(const char *id, int score, float time, int rank, int s
 }
 
 // ---------------------------------------------------------------- app state
-enum { ST_SELECT, ST_PLAY, ST_PAUSE, ST_SETTINGS };
+enum { ST_SELECT, ST_PLAY, ST_PAUSE, ST_SETTINGS, ST_INTRO };
 
 static C3D_RenderTarget *top, *bot;
 static C2D_TextBuf tbuf;
-static int state = ST_SELECT, settings_back = ST_SELECT;
+static int state = ST_INTRO, settings_back = ST_SELECT;
 static int cur_world, cur_level, sel_world, sel_cursor, sel_scroll;
 static Game game;
 static LevelDef level;
@@ -340,19 +352,25 @@ static bool start_level(int w, int l) {
 static bool start_level_(int w, int l) {
     unload_level();
     char path[128];
-    snprintf(path, sizeof(path), "romfs:/levels/w%d/%s.txt", w, wnames[w][l]);
-    if (!level_load(&level, path)) return false;
+    snprintf(path, sizeof(path), "%s/levels/w%d/%s.txt", data_root(), w, wnames[w][l]);
+    PROF_BEGIN("level text");
+    bool read = level_load(&level, path);
+    PROF_END();
+    if (!read) return false;
     level_loaded = true;
-    snprintf(path, sizeof(path), "romfs:/levels/w%d/%s_u.t3x", w, wnames[w][l]);
-    floor_u = C2D_SpriteSheetLoad(path);
+    PROF_BEGIN("floor pictures");
+    snprintf(path, sizeof(path), "%s/levels/w%d/%s_u.t3x", data_root(), w, wnames[w][l]);
+    floor_u = sheet_load(path);
     if (level.has_over) {
-        snprintf(path, sizeof(path), "romfs:/levels/w%d/%s_o.t3x", w, wnames[w][l]);
-        floor_o = C2D_SpriteSheetLoad(path);
+        snprintf(path, sizeof(path), "%s/levels/w%d/%s_o.t3x", data_root(), w, wnames[w][l]);
+        floor_o = sheet_load(path);
     }
     if (level.ndspr > 0) { // pictures of the blocks, doors, keys and skulls
-        snprintf(path, sizeof(path), "romfs:/levels/w%d/%s_d.t3x", w, wnames[w][l]);
-        dyn_sheet = C2D_SpriteSheetLoad(path);
+        snprintf(path, sizeof(path), "%s/levels/w%d/%s_d.t3x", data_root(), w, wnames[w][l]);
+        dyn_sheet = sheet_load(path);
     }
+    prefetch_drop(); // a picture this level turned out not to have
+    PROF_END();
     cur_world = w;
     cur_level = l;
     game.ndemo = 0;
@@ -372,25 +390,53 @@ static bool start_level_(int w, int l) {
     return true;
 }
 
+static bool level_after(int *w, int *l);
 static void next_level(void) {
-    if (cur_level + 1 < wcount[cur_world]) start_level(cur_world, cur_level + 1);
-    else if (cur_world + 1 < NWORLDS && wcount[cur_world + 1] > 0) start_level(cur_world + 1, 0);
+    int w = cur_world, l = cur_level;
+    if (level_after(&w, &l)) start_level(w, l);
     else to_select();
 }
 
 // ---------------------------------------------------------------- transitions
 // Screen changes fade through black (the original cuts straight across). The change itself happens
 // on the first frame after the screen is fully black, so a level load's pause is never seen.
-enum { TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS };
+enum { TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS, TR_INTRO_DONE };
 #define TR_OUT (1.0f / 60 / 0.12f) // 0.12 s to black
 #define TR_IN (1.0f / 60 / 0.16f)  // 0.16 s back
 static int tr_phase = 2, tr_act, tr_a, tr_b; // phase 0 idle, 1 going dark, 2 coming back
 static float tr_k = 1;                       // how dark (the game starts on black and fades in)
+static void boot_finish(void);
+
+static float tr_out = TR_OUT, tr_in = TR_IN; // the intro fades slower
+
+// the level after (w, l), or false at the end of the game
+static bool level_after(int *w, int *l) {
+    if (*l + 1 < wcount[*w]) return ++*l, true;
+    if (*w + 1 < NWORLDS && wcount[*w + 1] > 0) return ++*w, *l = 0, true;
+    return false;
+}
+
+// start reading a level's pictures, so the load during the fade's black frame only copies them
+static void prefetch_level(int w, int l) {
+    static const char *const SUF[3] = {"u", "o", "d"};
+    char path[160];
+    for (int i = 0; i < 3; i++) {
+        // a picture the level does not have just fails on the worker (opening files here would cost
+        // the frame: on the SD card each open takes a while)
+        snprintf(path, sizeof(path), "%s/levels/w%d/%s_%s.t3x", data_root(), w, wnames[w][l], SUF[i]);
+        prefetch(path);
+    }
+}
 
 static void go(int act, int a, int b) {
     if (tr_phase == 1) return; // one change at a time
     tr_phase = 1;
     tr_act = act, tr_a = a, tr_b = b;
+    if (act == TR_START) prefetch_level(a, b);
+    if (act == TR_NEXT) {
+        int w = cur_world, l = cur_level;
+        if (level_after(&w, &l)) prefetch_level(w, l);
+    }
 }
 
 static void open_settings(int back);
@@ -404,13 +450,14 @@ static void transition_step(void) {
         case TR_SELECT: to_select(); break;
         case TR_SETTINGS: open_settings(tr_a); break;
         case TR_CLOSE_SETTINGS: close_settings_now(); break;
+        case TR_INTRO_DONE: boot_finish(); state = ST_SELECT; break;
         }
         tr_phase = 2;
     } else if (tr_phase == 1) {
-        tr_k = fminf(1, tr_k + TR_OUT);
+        tr_k = fminf(1, tr_k + tr_out);
     } else if (tr_phase == 2) {
-        tr_k -= TR_IN;
-        if (tr_k <= 0) tr_k = 0, tr_phase = 0;
+        tr_k -= tr_in;
+        if (tr_k <= 0) tr_k = 0, tr_phase = 0, tr_out = TR_OUT, tr_in = TR_IN;
     }
 }
 
@@ -788,7 +835,11 @@ static void draw_course(void) {
         if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.1f, NULL, -s, s);
         else C2D_DrawImageAt(img, course_left(), course_top(), 0.1f, NULL, s, s);
     }
+    // fixed depths, bottom to top (goal.tscn: hole and flag under player.tscn's cat); citro2d keeps the
+    // higher depth in front whatever the drawing order
+    ui_z = 0.2f;
     if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, shade_color(1), 0);
+    ui_z = 0.25f;
     for (int i = 0; i < game.ncoins; i++)
         if (!game.coins[i].taken) draw_sprite("coin", world_to_screen(game.coins[i].pos), k, 1, shade_color(1), 0);
     // blocks, doors, keys and skulls: pictures baked by the converter with their
@@ -808,10 +859,12 @@ static void draw_course(void) {
             if (kk->alive) draw_dyn(kk->spr, kk->pos, k, C2D_Color32f(1, 1, 1, kk->alpha));
         }
     }
+    ui_z = 0.4f;
     if (game.sprite_visible) {
         float sc = game.sprite_scale / 0.064f;
         draw_sprite("costume_canny", world_to_screen(game.pos), k, sc, shade_color(1), 0);
     }
+    ui_z = 0.45f;
     for (int i = 0; i < game.nghosts; i++)
         if (game.ghosts[i].alive) draw_sprite("costume_uncanny", world_to_screen(game.ghosts[i].pos), k, 1, shade_color(1), 0);
     if (game.hit_visible && game.pstate == PS_IDLE) {
@@ -1509,6 +1562,106 @@ static void settings_input(u32 kd, bool tdown, bool theld, bool tup, vec2 touch)
     }
 }
 
+// ---------------------------------------------------------------- intro credits
+// A golf joke: the original team on a pencilled scorecard (top), and Canny whacked into the cup of a
+// putting green whose flag is NickBin's logo (bottom). Art from tools/convert/credits.py.
+static int intro_t; // frames since boot
+#define INTRO_HIT 48   // Canny gets whacked
+#define INTRO_LAND 108 // and drops in the cup
+#define INTRO_END (60 * 7)
+#define CUP_X 242.0f
+#define CUP_Y 172.0f
+
+static float ease_out(float p) {
+    p = p < 0 ? 0 : p > 1 ? 1 : p;
+    return 1 - (1 - p) * (1 - p) * (1 - p);
+}
+
+static void draw_intro_top(void) {
+    draw_top_bg();
+    // the card drops in, lands with a small wobble and stays a little crooked
+    float t = intro_t / 60.0f, p = ease_out(t / 0.6f);
+    float y = 120 - (1 - p) * 260;
+    y += t > 0.6f ? sinf((t - 0.6f) * 14) * 5 * expf(-(t - 0.6f) * 4) : 0;
+    ui_z = 0.5f;
+    draw_spr(spr_find("cr_card"), v2(200, y), 1, 1, WHITE, 0);
+    // pencil on the card, in the system font: the card's art holds nothing from the game, so it is
+    // part of the 3dsx/cia even when the game's files live on the SD card (credits.py lines it up)
+    static const char *const HOLES[5][4] = {
+        // from the game's credits room (MENU_Credits* in UCG_T.csv)
+        {"1", "SH2K (Robert)", "made the game", "1"},
+        {"2", "fogwaves", "programming + juice", "2"},
+        {"3", "BlakeTheGuy", "made the friction good", "3"},
+        {"4", "mbx8_rt", "level design", "4"},
+        {"5", "bibizu", "*cough* pro gamming", "5"},
+    };
+    float ox = 8, oy = y - 113;
+    u32 pencil = C2D_Color32(58, 58, 74, 255), red = C2D_Color32(214, 92, 92, 255);
+    C2D_Font keep = cur_font;
+    cur_font = NULL; // the system font
+    ui_z = 0.52f;
+    text(ox + 42, oy + 6, 0.62f, pencil, 0, "UNCANNY CAT GOLF - the scorecard");
+    static const float CX[4] = {6, 42, 168, 346};
+    static const char *const HEAD[4] = {"HOLE", "WHO", "DID WHAT", "PAR"};
+    for (int c = 0; c < 4; c++) text(ox + CX[c], oy + 33, 0.4f, red, 0, HEAD[c]);
+    for (int r = 0; r < 5; r++)
+        for (int c = 0; c < 4; c++)
+            text(ox + CX[c] + (c == 0 || c == 3 ? 7 : 0), oy + 54 + r * 22, 0.5f, pencil, 0, HOLES[r][c]);
+    // the last three each get their own band between the card's ruled lines (162, 184, 206)
+    float mid = ox + 192 + 17; // the middle of the card right of its red margin
+    text(mid, oy + 166, 0.4f, red, C2D_AlignCenter, "playtested by");
+    text(mid, oy + 188, 0.42f, pencil, C2D_AlignCenter, "Penny, Amber, Bobby, hyphen-lost, Mira, Felix, Rheanna");
+    text(mid, oy + 209, 0.38f, C2D_Color32(110, 110, 130, 255), C2D_AlignCenter,
+         "the original game: slappyhappy2000.itch.io");
+    cur_font = keep;
+}
+
+static void draw_intro(void) {
+    float t = intro_t / 60.0f;
+    ui_z = 0.1f;
+    draw_hud("cr_green", 0, 0, 1, WHITE);
+    // the flag: a pole in the cup and the logo as its banner, rippling away from the pole
+    ui_z = 0.3f;
+    C2D_DrawRectSolid(CUP_X - 1, 60, ui_z, 3, CUP_Y - 60, C2D_Color32(236, 236, 228, 255));
+    int li = spr_find("cr_logo");
+    if (li >= 0 && *sprinfo[li].sheet) {
+        C2D_Image img = C2D_SpriteSheetGetImage(*sprinfo[li].sheet, sprinfo[li].idx);
+        const int N = 16;
+        for (int i = 0; i < N; i++) {
+            float k = (float)i / (N - 1), dy = sinf(t * 5 - i * 0.45f) * 3.5f * k;
+            draw_img_part(img, i * 128.0f / N, 0, 128.0f / N, 128, CUP_X + 2 + i * 4.0f, 62 + dy, 4, 64, WHITE);
+        }
+    }
+    // Canny: waits on the tee, flies when whacked, then sits in the cup
+    ui_z = 0.4f;
+    float k = 1.1f;
+    if (intro_t < INTRO_HIT) {
+        draw_sprite("costume_canny", v2(42, 196), k, 1, WHITE, 0);
+    } else if (intro_t < INTRO_LAND) {
+        float p = (intro_t - INTRO_HIT) / (float)(INTRO_LAND - INTRO_HIT);
+        float x = 42 + (CUP_X - 42) * p, y = 196 + (CUP_Y - 6 - 196) * p - sinf(p * 3.14159f) * 130;
+        draw_sprite("costume_canny", v2(x, y), k, 1, WHITE, p * 4 * 3.14159f);
+    } else {
+        // only the top half shows above the cup's rim
+        draw_sprite("costume_canny", v2(CUP_X, CUP_Y - 10), k * 0.8f, 1, WHITE, 0);
+        ui_z = 0.42f; // the green in front of the cup hides Canny's bottom half
+        int gi = spr_find("cr_green");
+        if (gi >= 0 && *sprinfo[gi].sheet)
+            draw_img_part(C2D_SpriteSheetGetImage(*sprinfo[gi].sheet, sprinfo[gi].idx), 0, CUP_Y, 320, 240 - CUP_Y, 0,
+                          CUP_Y, 320, 240 - CUP_Y, WHITE);
+    }
+    ui_z = 0.6f;
+    cur_font = font_ui;
+    text_ol(18, 74, 0.55f, grey(0.95f), 0, "Ported to 3DS by");
+    text_ol(18, 96, 1.05f, WHITE, 0, "NickBin");
+    if (intro_t >= INTRO_LAND) {
+        float s = 0.55f + 0.25f * ease_out((intro_t - INTRO_LAND) / 18.0f);
+        text_rainbow(160 - str_width(s, "HOLE IN ONE!") / 2, 12, s, 1, "HOLE IN ONE!");
+    }
+    if (intro_t > 150 && (intro_t / 30) % 2 == 0 && tr_phase == 0)
+        text_ol(160, 214, 0.45f, grey(0.95f), C2D_AlignCenter, "Tap to tee off");
+}
+
 // ---------------------------------------------------------------- main
 // every gameplay sound (about 6 MB decoded). The worker thread decodes them all from boot, so none stalls
 // a level the first time it plays and the boot screen does not wait for them.
@@ -1520,6 +1673,55 @@ static const char *const PRELOAD[] = {
     "game/levelStart.ogg", "game/levelWin.ogg", "game/resultsDrumroll.ogg", "game/rankAtrocious.ogg",
     "game/rankErm.ogg", "game/rankOK.ogg", "game/rankPeak.ogg", "game/rankSwag.ogg",
     "gimmicks/screamsOfDeadPeople.ogg", "minigame/meowl_die.ogg"};
+
+// ---------------------------------------------------------------- loading behind the intro
+// The intro needs only its own art, the sprites (Canny), the top background and the font. Everything
+// else is read by the worker while the credits play, and turned into textures here a piece per frame.
+static const char *const BEHIND[] = {"gfx/hud.t3x", "gfx/menu.t3x", "gfx/settings_bg.t3x", "gfx/jumpscare.t3x"};
+#define NBEHIND (int)(sizeof(BEHIND) / sizeof(BEHIND[0]))
+static int behind_done;
+
+static void boot_piece(int i) {
+    switch (i) {
+    case 0: load_sheet(&hudsheet, dp("gfx/hud.t3x"), dp("gfx/hud.txt")); break;
+    case 1: load_sheet(&menusheet, dp("gfx/menu.t3x"), dp("gfx/menu.txt")); break;
+    case 2: settings_bg = sheet_load(dp("gfx/settings_bg.t3x")); break;
+    case 3: jumpscare_sheet = sheet_load(dp("gfx/jumpscare.t3x")); break;
+    }
+}
+
+static void boot_step(void) { // one finished piece per frame
+    if (behind_done < NBEHIND && prefetch_ready(dp(BEHIND[behind_done]))) boot_piece(behind_done++);
+}
+
+static void boot_finish(void) { // whatever is left, before the game shows (waits for the worker)
+    while (behind_done < NBEHIND) boot_piece(behind_done++);
+}
+
+// ---------------------------------------------------------------- the Oops screen
+// When the game's files are in neither sdmc:/3ds/Uncanny Cat Golf/ nor the 3dsx: an upset cat, the
+// message and a sad trombone, all from romfs:/port/ (tools/convert/credits.py). START quits.
+static void oops_screen(void) {
+    C2D_SpriteSheet sheet = NULL;
+    load_sheet(&sheet, "romfs:/port/oops.t3x", "romfs:/port/oops.txt");
+    audio_init();
+    sfx_play("romfs:/port/oops.wav", 1, 1);
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (hidKeysDown() & KEY_START) break;
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C2D_TargetClear(top, C2D_Color32(0, 0, 0, 255));
+        C2D_TargetClear(bot, C2D_Color32(0, 0, 0, 255));
+        C2D_SceneBegin(top);
+        ui_z = 0.5f;
+        draw_hud("oops_top", 0, 0, 1, WHITE);
+        C2D_SceneBegin(bot);
+        draw_hud("oops_bottom", 0, 0, 1, WHITE);
+        C3D_FrameEnd(0);
+    }
+    audio_exit();
+    if (sheet) C2D_SpriteSheetFree(sheet);
+}
 
 int main(void) {
     romfsInit();
@@ -1537,17 +1739,26 @@ int main(void) {
     srand((unsigned)osGetTime());
 
     save_init();
-    load_sheet(&sprites, "romfs:/gfx/sprites.t3x", "romfs:/gfx/sprites.txt");
-    load_sheet(&hudsheet, "romfs:/gfx/hud.t3x", "romfs:/gfx/hud.txt");
-    load_sheet(&menusheet, "romfs:/gfx/menu.t3x", "romfs:/gfx/menu.txt");
-    top_bg = C2D_SpriteSheetLoad("romfs:/gfx/top_bg.t3x");
-    settings_bg = C2D_SpriteSheetLoad("romfs:/gfx/settings_bg.t3x");
-    jumpscare_sheet = C2D_SpriteSheetLoad("romfs:/gfx/jumpscare.t3x");
     fontEnsureMapped();
     lf_sys = C2D_FontGetInfo(NULL)->lineFeed;
-    font_ui = C2D_FontLoad("romfs:/gfx/ui.bcfnt");
-    font_bubble = C2D_FontLoad("romfs:/gfx/bubble.bcfnt");
-    font_square = C2D_FontLoad("romfs:/gfx/square.bcfnt");
+    if (!data_find()) {
+        oops_screen();
+        save_exit();
+        C2D_TextBufDelete(tbuf);
+        C2D_Fini();
+        C3D_Fini();
+        gfxExit();
+        romfsExit();
+        return 0;
+    }
+    // what the intro needs now; the rest is read behind it (boot_step)
+    load_sheet(&creditsheet, "romfs:/port/credits.t3x", "romfs:/port/credits.txt");
+    load_sheet(&sprites, dp("gfx/sprites.t3x"), dp("gfx/sprites.txt"));
+    top_bg = C2D_SpriteSheetLoad(dp("gfx/top_bg.t3x"));
+    // the three fonts are one file when the game uses one font for all (it does: Comic Sans)
+    font_ui = C2D_FontLoad(dp("gfx/ui.bcfnt"));
+    font_bubble = C2D_FontLoad(dp("gfx/bubble.bcfnt"));
+    font_square = C2D_FontLoad(dp("gfx/square.bcfnt"));
     if (!font_bubble) font_bubble = font_ui;
     if (!font_square) font_square = font_ui;
     cur_font = font_ui;
@@ -1559,14 +1770,20 @@ int main(void) {
     savedata = cfg_open("save_data.ini");
     apply_settings();
     worker_start();
+    for (int i = 0; i < NBEHIND; i++) prefetch(dp(BEHIND[i]));
     // decoded by the worker, the menu's own sounds first, so no sound is decoded mid-game
+    sfx_preload("player/hit.ogg"); // the intro's two sounds first
+    sfx_preload("game/rankPeak.ogg");
     for (int i = 0; i < (int)(sizeof(PRELOAD) / sizeof(PRELOAD[0])); i++) sfx_preload(PRELOAD[i]);
     music_play(1);
     thoughts_fallback("Idle");
     thoughts_play("Idle");
     fps_since = osGetTime();
+    tr_in = 1.0f / 60 / 0.5f; // the credits fade in over half a second
 
+#if UCG_PROFILE
     int frame_no = 0;
+#endif
     while (aptMainLoop()) {
         PROF_FRAME_BEGIN();
         hidScanInput();
@@ -1579,7 +1796,16 @@ int main(void) {
         bool tdown = kd & KEY_TOUCH, theld = kh & KEY_TOUCH, tup = ku & KEY_TOUCH;
         if (theld) last_touch = touch;
 
-        if (state == ST_SELECT) {
+        if (state == ST_INTRO) {
+            intro_t++;
+            if (intro_t == INTRO_HIT) sfx_play("player/hit.ogg", 1, 1);
+            if (intro_t == INTRO_LAND) sfx_play("game/rankPeak.ogg", 1, 1);
+            if (intro_t > INTRO_LAND + 30) boot_step(); // once Canny is in the cup and the screen is calm
+            if ((intro_t > 20 && (kd & (KEY_A | KEY_B | KEY_START | KEY_TOUCH))) || intro_t > INTRO_END) {
+                go(TR_INTRO_DONE, 0, 0);
+                tr_out = tr_in = 1.0f / 60 / 0.5f; // half a second out of the credits and into the game
+            }
+        } else if (state == ST_SELECT) {
             int n = wcount[sel_world];
             int dw = (kd & KEY_R) ? 1 : (kd & KEY_L) ? -1 : 0;
             if (kd & KEY_RIGHT) sel_cursor = (sel_cursor + 1) % n;
@@ -1753,7 +1979,8 @@ int main(void) {
 
         C2D_SceneBegin(top);
         ui_z = 0.5f;
-        if (state == ST_SELECT) draw_select_top();
+        if (state == ST_INTRO) draw_intro_top();
+        else if (state == ST_SELECT) draw_select_top();
         else if (state == ST_SETTINGS) draw_settings_top();
         else if (game.victory && win_t > 20) draw_results_top();
         else draw_top_hud();
@@ -1763,7 +1990,8 @@ int main(void) {
 
         C2D_SceneBegin(bot);
         ui_z = 0.5f;
-        if (state == ST_SELECT) draw_select();
+        if (state == ST_INTRO) draw_intro();
+        else if (state == ST_SELECT) draw_select();
         else if (state == ST_SETTINGS && settings_back == ST_SELECT) draw_settings();
         else {
             draw_course();
@@ -1809,7 +2037,7 @@ int main(void) {
         PROF_MARK("~frame end");
 #if UCG_PROFILE
         {
-            static const char *SN[] = {"select", "play", "pause", "settings"};
+            static const char *SN[] = {"select", "play", "pause", "settings", "intro"};
             char what[48];
             snprintf(what, sizeof(what), "%s %s%s", SN[state], state == ST_SELECT ? "" : level.id,
                      game.victory ? " won" : game.lose ? " lost" : "");

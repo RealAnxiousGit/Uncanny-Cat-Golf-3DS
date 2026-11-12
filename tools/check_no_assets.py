@@ -14,7 +14,9 @@ BLOCKED_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".ogg", ".wav", ".mp3",
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 files = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, text=True, check=True).stdout.split("\0")
-bad = [f for f in files if f and os.path.splitext(f)[1].lower() in BLOCKED_EXT]
+# port-art/ holds the port's own pictures (NickBin's logo), never anything from the game
+OWN = "port-art/"
+bad = [f for f in files if f and not f.startswith(OWN) and os.path.splitext(f)[1].lower() in BLOCKED_EXT]
 if bad:
     print("Game files must not be in the repository:")
     for f in bad:
