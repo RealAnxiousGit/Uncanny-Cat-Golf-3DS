@@ -129,13 +129,13 @@ def oops_top():
     return im
 
 
-def oops_bottom():
+def oops_bottom(text=OOPS_TEXT):
     """320x240: the message, in Comic Sans."""
     im = Image.new("RGBA", (320, 240), (250, 246, 232, 255))
     d = ImageDraw.Draw(im)
     f = _comic(17)
     y = 14
-    for line in _wrap(d, OOPS_TEXT, f, 290):
+    for line in _wrap(d, text, f, 290):
         d.text((16, y), line, font=f, fill=INK)
         y += 23
     small = _comic(14)
@@ -143,8 +143,11 @@ def oops_bottom():
     return im
 
 
-def oops_entries():
-    return [("oops_top", oops_top(), (0, 0)), ("oops_bottom", oops_bottom(), (0, 0))]
+def oops_entries(version):
+    wrong = ("Oops! The files in your \"sdmc:/3ds/Uncanny Cat Golf/\" folder don't match this version of the "
+             "port. Please make the folder again from the Uncanny Cat Golf %s source code." % version)
+    return [("oops_top", oops_top(), (0, 0)), ("oops_bottom", oops_bottom(), (0, 0)),
+            ("oops_version", oops_bottom(wrong), (0, 0))]
 
 
 def sad_trombone(path, rate=22050):

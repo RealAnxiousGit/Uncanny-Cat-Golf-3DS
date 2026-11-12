@@ -1701,7 +1701,7 @@ static void boot_finish(void) { // whatever is left, before the game shows (wait
 // ---------------------------------------------------------------- the Oops screen
 // When the game's files are in neither sdmc:/3ds/Uncanny Cat Golf/ nor the 3dsx: an upset cat, the
 // message and a sad trombone, all from romfs:/port/ (tools/convert/credits.py). START quits.
-static void oops_screen(void) {
+static void oops_screen(bool wrong_version) {
     C2D_SpriteSheet sheet = NULL;
     load_sheet(&sheet, "romfs:/port/oops.t3x", "romfs:/port/oops.txt");
     audio_init();
@@ -1716,7 +1716,7 @@ static void oops_screen(void) {
         ui_z = 0.5f;
         draw_hud("oops_top", 0, 0, 1, WHITE);
         C2D_SceneBegin(bot);
-        draw_hud("oops_bottom", 0, 0, 1, WHITE);
+        draw_hud(wrong_version ? "oops_version" : "oops_bottom", 0, 0, 1, WHITE);
         C3D_FrameEnd(0);
     }
     audio_exit();
@@ -1741,8 +1741,9 @@ int main(void) {
     save_init();
     fontEnsureMapped();
     lf_sys = C2D_FontGetInfo(NULL)->lineFeed;
-    if (!data_find()) {
-        oops_screen();
+    int found = data_find();
+    if (found != DATA_OK) {
+        oops_screen(found == DATA_WRONG_VERSION);
         save_exit();
         C2D_TextBufDelete(tbuf);
         C2D_Fini();
@@ -1792,7 +1793,8 @@ int main(void) {
         hidTouchRead(&tp);
         vec2 touch = v2(tp.px, tp.py);
         transition_step();
-        if (tr_phase) kd = kh = ku = 0; // no input while the screen changes
+        // no input while the screen goes dark; while it comes back the new screen already listens
+        if (tr_phase == 1) kd = kh = ku = 0;
         bool tdown = kd & KEY_TOUCH, theld = kh & KEY_TOUCH, tup = ku & KEY_TOUCH;
         if (theld) last_touch = touch;
 
@@ -1951,12 +1953,15 @@ int main(void) {
                     snprintf(id, sizeof(id), "%s", level.id);
                     record_result(id, game.final_score, game.time, game.rank, game.strokes);
                 }
-                if (game.events & EV_PAUSE) {
-                    state = ST_PAUSE;
-                    pause_cursor = 0;
-                }
                 if (game.progress == PROG_RESET || game.progress == PROG_WIN_RESET) go(TR_START, cur_world, cur_level);
                 else if (game.progress == PROG_SKIP) go(TR_NEXT, 0, 0);
+            }
+            // pause works the whole time a course is up: before the cat drops in, after a death and on
+            // the results too (the original's level.gd only allows it while the level is active)
+            if (in.pause_pressed && state == ST_PLAY && tr_phase != 1) {
+                state = ST_PAUSE;
+                pause_cursor = 0;
+                sfx_play("player/grab.ogg", 1, 1);
             }
             if (jumpscare_t > 0) jumpscare_t--;
         }

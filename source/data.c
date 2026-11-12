@@ -1,6 +1,7 @@
 #include "data.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static const char *root = "romfs:";
 
@@ -13,15 +14,37 @@ static bool has_game(const char *r) {
     return true;
 }
 
-bool data_find(void) {
-    // the SD card first, so a folder made from a newer game version wins over a test build's copy
+// ucg-data.txt (written by tools/convert): the game version it was made from and the data format
+static bool fits(const char *r) {
+    char p[96], line[96], want_v[64], want_f[32];
+    snprintf(p, sizeof(p), "%s/ucg-data.txt", r);
+    snprintf(want_v, sizeof(want_v), "version %s", UCG_GAME_VERSION);
+    snprintf(want_f, sizeof(want_f), "format %d", DATA_FORMAT);
+    FILE *f = fopen(p, "r");
+    if (!f) return false; // made by a converter from before the stamp
+    bool v = false, fm = false;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        v = v || !strcmp(line, want_v);
+        fm = fm || !strcmp(line, want_f);
+    }
+    fclose(f);
+    return v && fm;
+}
+
+int data_find(void) {
+    // the SD card first, so a folder the player made wins over a test build's own copy
     static const char *const ROOTS[] = {DATA_SD, "romfs:"};
+    int found = DATA_MISSING;
     for (int i = 0; i < 2; i++)
         if (has_game(ROOTS[i])) {
-            root = ROOTS[i];
-            return true;
+            if (fits(ROOTS[i])) {
+                root = ROOTS[i];
+                return DATA_OK;
+            }
+            found = DATA_WRONG_VERSION;
         }
-    return false;
+    return found;
 }
 
 const char *data_root(void) { return root; }

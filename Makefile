@@ -31,6 +31,12 @@ ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS	:=	-g -Wall -O2 -mword-relocations -ffunction-sections -fdata-sections $(ARCH)
 PROFILE	?=	0
 CFLAGS	+=	$(INCLUDE) -D__3DS__ -DUCG_PROFILE=$(PROFILE)
+# the game version the port follows (first line of tools/ported-source.txt), checked against the data folder
+GAME_VERSION	:=	$(shell sed -n '1s/^version //p' $(TOPDIR)/tools/ported-source.txt)
+ifeq ($(GAME_VERSION),)
+$(error no "version" line in tools/ported-source.txt)
+endif
+CFLAGS	+=	-DUCG_GAME_VERSION='"$(GAME_VERSION)"'
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS	:=	-g $(ARCH)

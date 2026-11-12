@@ -43,6 +43,19 @@ def _ported_version():
 
 
 EXPECTED_VERSION = _ported_version()
+
+
+def _data_format():
+    """DATA_FORMAT from source/data.h, so the game and the converter agree on one number."""
+    h = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "source", "data.h")
+    m = re.search(r"#define DATA_FORMAT (\d+)", open(h, encoding="utf-8").read())
+    return int(m.group(1))
+
+
+def write_stamp(out, version):
+    """romfs/ucg-data.txt: which game version and data format the folder was made from."""
+    with open(os.path.join(out, "romfs", "ucg-data.txt"), "w", newline="\n") as f:
+        f.write("Uncanny Cat Golf 3DS data\nversion %s\nformat %d\n" % (version, _data_format()))
 LEVEL_DIR = "res://assetsNEW/scenes/game/levels/regular"
 SPRITE_PX_PER_UNIT = 2.0
 TEX3DS = os.path.join(os.environ.get("DEVKITPRO", "/opt/devkitpro"), "tools", "bin", "tex3ds")
@@ -305,7 +318,7 @@ def convert_port(out):
     tmp = os.path.join(out, "tmp_port")
     os.makedirs(port, exist_ok=True)
     os.makedirs(tmp, exist_ok=True)
-    for sheet, items in (("credits", CR.entries()), ("oops", CR.oops_entries())):
+    for sheet, items in (("credits", CR.entries()), ("oops", CR.oops_entries(EXPECTED_VERSION))):
         files, lines = [], []
         for i, (name, img, anchor) in enumerate(items):
             fp = os.path.join(tmp, "%s%02d_%s.png" % (sheet, i, name))
@@ -459,6 +472,8 @@ def main():
     if want("port"):
         log("port:")
         convert_port(a.out)
+    os.makedirs(os.path.join(a.out, "romfs"), exist_ok=True)
+    write_stamp(a.out, ver)
     if want("thoughts") and not a.no_thoughts:
         log("thoughts:")
         HUD.convert_thoughts(project, a.out, log, report)

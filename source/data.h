@@ -5,7 +5,14 @@
 #include <stdbool.h>
 
 #define DATA_SD "sdmc:/3ds/Uncanny Cat Golf"
+// Bumped whenever the converter's output changes in a way older folders can't follow; the converter
+// reads it from here and writes it into the folder's ucg-data.txt.
+#define DATA_FORMAT 1
+#ifndef UCG_GAME_VERSION
+#define UCG_GAME_VERSION "?"
+#endif
 
-bool data_find(void);             // false when the game's files are in neither place
+enum { DATA_OK, DATA_MISSING, DATA_WRONG_VERSION };
+int data_find(void);              // where the game's files are, and whether they fit this build
 const char *data_root(void);      // DATA_SD or "romfs:"
 const char *dp(const char *rel);  // data_root() + "/" + rel; the last 8 results stay valid
