@@ -1,3 +1,4 @@
+#include "prof.h"
 #include "audio.h"
 
 #include <3ds.h>
@@ -37,6 +38,14 @@ static const Track *cur_track;
 static ndspWaveBuf mbuf[MUSIC_BUFS];
 static int16_t *mdata[MUSIC_BUFS];
 
+// The worker thread (audio_bg_step) streams the music and decodes queued sounds, so neither
+// costs the game a frame. alock guards the music decoder and the sound table.
+static LightLock alock;
+#define PRELOAD_Q 64
+static char preload_q[PRELOAD_Q][64];
+static int q_head, q_tail;
+static volatile bool bg_on; // a worker is running; otherwise the game thread does the work
+
 static void load_track_index(void) {
     FILE *f = fopen("romfs:/music/index.txt", "r");
     if (!f) return;
@@ -55,6 +64,7 @@ static void load_track_index(void) {
 bool audio_init(void) {
     if (R_FAILED(ndspInit())) return false;
     ok = true;
+    LightLock_Init(&alock);
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     for (int i = 0; i < MUSIC_BUFS; i++) mdata[i] = linearAlloc(MUSIC_BUF_SAMPLES * 2 * sizeof(int16_t));
     load_track_index();
@@ -81,17 +91,35 @@ void audio_set_volumes(float master, float music, float sound) {
     }
 }
 
-static Sfx *find_or_load(const char *rel) {
+static Sfx *find_locked(const char *rel) {
     for (int i = 0; i < nsfx; i++)
         if (!strcmp(sfx[i].name, rel)) return &sfx[i];
-    if (nsfx >= MAX_SFX) return NULL;
+    return NULL;
+}
+
+static Sfx *find(const char *rel) {
+    LightLock_Lock(&alock);
+    Sfx *s = find_locked(rel);
+    LightLock_Unlock(&alock);
+    return s;
+}
+
+// decodes outside the lock (the slow part), then adds the sound to the table
+static Sfx *find_or_load(const char *rel) {
+    Sfx *have = find(rel);
+    if (have) return have;
     char path[160];
     snprintf(path, sizeof(path), "romfs:/sfx/%s", rel);
+    PROF_BEGIN("sound decode");
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f) {
+        PROF_END();
+        return NULL;
+    }
     OggVorbis_File vf;
     if (ov_open(f, &vf, NULL, 0) < 0) {
         fclose(f);
+        PROF_END();
         return NULL;
     }
     vorbis_info *vi = ov_info(&vf, -1);
@@ -100,6 +128,7 @@ static Sfx *find_or_load(const char *rel) {
     int16_t *pcm = linearAlloc((size_t)total * ch * sizeof(int16_t) + 8192);
     if (!pcm) {
         ov_clear(&vf);
+        PROF_END();
         return NULL;
     }
     size_t got = 0, cap = (size_t)total * ch * sizeof(int16_t);
@@ -109,19 +138,40 @@ static Sfx *find_or_load(const char *rel) {
         if (n <= 0) break;
         got += n;
     }
-    Sfx *s = &sfx[nsfx++];
-    snprintf(s->name, sizeof(s->name), "%s", rel);
-    s->pcm = pcm;
-    s->channels = ch;
-    s->rate = vi->rate;
-    s->frames = got / (ch * sizeof(int16_t));
+    int rate = vi->rate;
     ov_clear(&vf); // closes f
     DSP_FlushDataCache(pcm, got);
+    LightLock_Lock(&alock);
+    Sfx *s = find_locked(rel); // the other thread may have finished it meanwhile
+    if (s || nsfx >= MAX_SFX) {
+        linearFree(pcm);
+    } else {
+        s = &sfx[nsfx];
+        snprintf(s->name, sizeof(s->name), "%s", rel);
+        s->pcm = pcm;
+        s->channels = ch;
+        s->rate = rate;
+        s->frames = got / (ch * sizeof(int16_t));
+        nsfx++;
+    }
+    LightLock_Unlock(&alock);
+    PROF_END();
     return s;
 }
 
+// queues a sound for the worker to decode (or decodes it now when there is no worker)
 void sfx_preload(const char *rel) {
-    if (ok) find_or_load(rel);
+    if (!ok) return;
+    if (!bg_on) {
+        find_or_load(rel);
+        return;
+    }
+    LightLock_Lock(&alock);
+    if ((q_tail + 1) % PRELOAD_Q != q_head) {
+        snprintf(preload_q[q_tail], sizeof(preload_q[0]), "%s", rel);
+        q_tail = (q_tail + 1) % PRELOAD_Q;
+    }
+    LightLock_Unlock(&alock);
 }
 
 void sfx_play(const char *rel, float pitch, float volume) {
@@ -159,7 +209,10 @@ static void music_fill(ndspWaveBuf *wb, int16_t *data) {
         }
         got += n;
     }
-    if (!got) return;
+    if (!got) { // the track ended: leave the buffer alone so it is not asked for again
+        wb->status = NDSP_WBUF_FREE;
+        return;
+    }
     memset(wb, 0, sizeof(*wb));
     wb->data_vaddr = data;
     wb->nsamples = got / (music_channels * sizeof(int16_t));
@@ -169,23 +222,34 @@ static void music_fill(ndspWaveBuf *wb, int16_t *data) {
 
 void music_play(int id) {
     if (!ok) return;
+    LightLock_Lock(&alock);
     const Track *t = NULL;
     for (int i = 0; i < ntracks; i++)
         if (tracks[i].id == id) t = &tracks[i];
-    if (t && t == cur_track && music_open) return;
+    if (t && t == cur_track && music_open) {
+        LightLock_Unlock(&alock);
+        return;
+    }
     ndspChnWaveBufClear(0);
     if (music_open) {
         ov_clear(&mvf);
         music_open = false;
     }
     cur_track = NULL;
-    if (!t) return;
+    if (!t) {
+        LightLock_Unlock(&alock);
+        return;
+    }
     char path[160];
     snprintf(path, sizeof(path), "romfs:/music/%s", t->file);
     FILE *f = fopen(path, "rb");
-    if (!f) return;
+    if (!f) {
+        LightLock_Unlock(&alock);
+        return;
+    }
     if (ov_open(f, &mvf, NULL, 0) < 0) {
         fclose(f);
+        LightLock_Unlock(&alock);
         return;
     }
     vorbis_info *vi = ov_info(&mvf, -1);
@@ -198,11 +262,51 @@ void music_play(int id) {
     ndspChnSetRate(0, music_rate);
     ndspChnSetFormat(0, music_channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
     audio_set_volumes(vol_master, vol_music, vol_sound);
-    for (int i = 0; i < MUSIC_BUFS; i++) music_fill(&mbuf[i], mdata[i]);
+    // the worker fills the buffers; without one, the first fill happens here
+    for (int i = 0; i < MUSIC_BUFS; i++) {
+        memset(&mbuf[i], 0, sizeof(mbuf[i]));
+        mbuf[i].status = NDSP_WBUF_DONE;
+    }
+    if (!bg_on)
+        for (int i = 0; i < MUSIC_BUFS; i++) music_fill(&mbuf[i], mdata[i]);
+    LightLock_Unlock(&alock);
+}
+
+static bool music_step(void) {
+    bool did = false;
+    LightLock_Lock(&alock);
+    if (music_open)
+        for (int i = 0; i < MUSIC_BUFS; i++)
+            if (mbuf[i].status == NDSP_WBUF_DONE) {
+                music_fill(&mbuf[i], mdata[i]);
+                did = true;
+                break; // one buffer per step keeps the lock short
+            }
+    LightLock_Unlock(&alock);
+    return did;
 }
 
 void music_update(void) {
-    if (!ok || !music_open) return;
-    for (int i = 0; i < MUSIC_BUFS; i++)
-        if (mbuf[i].status == NDSP_WBUF_DONE) music_fill(&mbuf[i], mdata[i]);
+    if (!ok || bg_on) return;
+    while (music_step()) {}
+}
+
+void audio_bg_set(bool on) { bg_on = on; }
+
+bool audio_bg_step(void) {
+    if (!ok) return false;
+    bool did = music_step();
+    char rel[64];
+    rel[0] = 0;
+    LightLock_Lock(&alock);
+    if (q_head != q_tail) {
+        snprintf(rel, sizeof(rel), "%s", preload_q[q_head]);
+        q_head = (q_head + 1) % PRELOAD_Q;
+    }
+    LightLock_Unlock(&alock);
+    if (rel[0]) {
+        find_or_load(rel);
+        did = true;
+    }
+    return did;
 }

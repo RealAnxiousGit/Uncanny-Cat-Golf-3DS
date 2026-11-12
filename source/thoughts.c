@@ -1,5 +1,8 @@
 // Thoughts clips: romfs:/thoughts/<Category>/<name>.uth, made by tools/convert/hud.py.
 // One frame is read and unpacked at a time, so clips never have to fit in memory.
+// The clip files belong to the worker thread (thoughts_bg_step): it opens clips and unpacks
+// frames into a finished picture, and the game thread only copies that picture into a texture.
+#include "prof.h"
 #include "thoughts.h"
 
 #include <math.h>
@@ -29,15 +32,35 @@ typedef struct {
 
 static ClipRef *refs;
 static int nrefs;
-static Clip stat, cur;
-static bool cur_open, enabled = true, loading, static_visible = true;
+
+// game thread
+static bool cur_open, enabled = true, loading, static_visible = true, info_ready;
 static char current_cat[16] = "", fallback_cat[16] = "Idle";
 static float current_frame, load_time, static_frame;
 static int loops;
+typedef struct {
+    int frames, loops;
+    float fps;
+    bool ok;
+} ClipInfo;
+static ClipInfo info;                  // the current clip, once the worker has opened it
+static int shown_id[3] = {-1, -1, -1}; // clip (0 static, 1 current), frame, request number
+
+// worker side
+static Clip stat, cur;
 static u8 zbuf[FW * FH + 1024];
 static u16 tiled_off[FW * FH];
-static const Clip *shown; // what the newest texture holds
-static int shown_frame = -1;
+static int opened_gen = 0, made_id[3] = {-1, -1, -1};
+#define PIX (TEX * 96) // the picture's 12 rows of 8x8 tiles
+static u16 work_pix[PIX];
+
+// shared, under tlock
+static LightLock tlock;
+static volatile bool bg;
+static char req_path[96];
+static int req_gen, open_gen_pub, want_id[3] = {0, 0, 0}, ready_id[3] = {-1, -1, -1};
+static ClipInfo info_pub;
+static u16 ready_pix[PIX];
 
 static C3D_Tex tex[2];
 static Tex3DS_SubTexture subtex = {FW, FH, 0.0f, 1.0f, FW / (float)TEX, 1.0f - FH / (float)TEX};
@@ -51,9 +74,9 @@ static void clip_close(Clip *c) {
 
 static bool clip_open(Clip *c, const char *path) {
     clip_close(c);
-    if (shown == c) shown = NULL;
     c->f = fopen(path, "rb");
     if (!c->f) return false;
+    PROF_BEGIN("clip open");
     u8 h[20];
     if (fread(h, 1, 20, c->f) != 20 || memcmp(h, "UTH1", 4)) {
         clip_close(c);
@@ -71,6 +94,7 @@ static bool clip_open(Clip *c, const char *path) {
     c->offs = malloc(4 * (c->frames + 1));
     fread(c->offs, 4, c->frames + 1, c->f);
     c->decoded = -1;
+    PROF_END();
     return true;
 }
 
@@ -92,16 +116,67 @@ static bool clip_unpack(Clip *c, int frame) {
     return true;
 }
 
-// write the unpacked frame into the next texture (two, so the GPU never reads a half-written one)
-static void show(Clip *c, int frame) {
-    if (shown == c && shown_frame == frame) return;
-    if (!clip_unpack(c, frame)) return;
-    tex_cur ^= 1;
-    u16 *dst = tex[tex_cur].data;
-    for (int k = 0; k < FW * FH; k++) dst[tiled_off[k]] = c->pal[c->idx[k]];
-    C3D_TexFlush(&tex[tex_cur]);
-    shown = c;
-    shown_frame = frame;
+// worker: open the clip asked for, or unpack the frame asked for into ready_pix
+bool thoughts_bg_step(void) {
+    char path[96];
+    int gen, want[3];
+    LightLock_Lock(&tlock);
+    gen = req_gen;
+    if (gen != opened_gen) snprintf(path, sizeof(path), "%s", req_path);
+    memcpy(want, want_id, sizeof(want));
+    LightLock_Unlock(&tlock);
+    if (gen != opened_gen) {
+        bool ok = path[0] && clip_open(&cur, path);
+        if (!ok) clip_close(&cur);
+        opened_gen = gen;
+        LightLock_Lock(&tlock);
+        open_gen_pub = gen;
+        info_pub = (ClipInfo){cur.frames, cur.loops, cur.fps, ok};
+        LightLock_Unlock(&tlock);
+        return true;
+    }
+    if (!memcmp(want, made_id, sizeof(want))) return false;
+    Clip *c = want[0] ? &cur : &stat;
+    if ((want[0] && want[2] != opened_gen) || !c->frames || want[1] >= c->frames) return false;
+    if (!clip_unpack(c, want[1])) return false;
+    for (int k = 0; k < FW * FH; k++) work_pix[tiled_off[k]] = c->pal[c->idx[k]];
+    memcpy(made_id, want, sizeof(want));
+    LightLock_Lock(&tlock);
+    memcpy(ready_pix, work_pix, sizeof(ready_pix));
+    memcpy(ready_id, want, sizeof(want));
+    LightLock_Unlock(&tlock);
+    return true;
+}
+
+void thoughts_bg_set(bool on) { bg = on; }
+
+// game thread: ask for a picture, and take the newest finished one if it is that picture
+// (two textures, so the GPU never reads one being written)
+static void show(int clip, int frame) {
+    int want[3] = {clip, frame, clip ? req_gen : 0};
+    if (!memcmp(want, shown_id, sizeof(want))) return;
+    LightLock_Lock(&tlock);
+    memcpy(want_id, want, sizeof(want));
+    LightLock_Unlock(&tlock);
+    if (!bg)
+        while (thoughts_bg_step()) {}
+    LightLock_Lock(&tlock);
+    if (!memcmp(ready_id, want, sizeof(want))) {
+        tex_cur ^= 1;
+        memcpy(tex[tex_cur].data, ready_pix, sizeof(ready_pix));
+        C3D_TexFlush(&tex[tex_cur]);
+        memcpy(shown_id, want, sizeof(want));
+    }
+    LightLock_Unlock(&tlock);
+}
+
+// game thread: which clip the worker should have open ("" closes it)
+static void request_clip(const char *path) {
+    LightLock_Lock(&tlock);
+    snprintf(req_path, sizeof(req_path), "%s", path);
+    req_gen++;
+    LightLock_Unlock(&tlock);
+    info_ready = false;
 }
 
 static u32 morton(u32 x, u32 y) {
@@ -111,6 +186,7 @@ static u32 morton(u32 x, u32 y) {
 }
 
 void thoughts_init(void) {
+    LightLock_Init(&tlock);
     for (int i = 0; i < 2; i++) {
         C3D_TexInit(&tex[i], TEX, TEX, GPU_RGB565);
         C3D_TexSetFilter(&tex[i], GPU_LINEAR, GPU_LINEAR);
@@ -152,7 +228,7 @@ void thoughts_exit(void) {
 void thoughts_enable(bool on) {
     enabled = on;
     if (!on) {
-        clip_close(&cur);
+        request_clip("");
         cur_open = false;
         current_cat[0] = 0;
         static_visible = true;
@@ -172,7 +248,8 @@ void thoughts_play(const char *category) {
         if (!strcmp(refs[i].cat, category) && pick-- == 0) {
             char path[96];
             snprintf(path, sizeof(path), "romfs:/thoughts/%s/%s.uth", refs[i].cat, refs[i].name);
-            cur_open = clip_open(&cur, path);
+            request_clip(path);
+            cur_open = true; // until the worker says it could not open it
             break;
         }
     loading = cur_open;
@@ -184,9 +261,18 @@ void thoughts_update(float dt) {
     if (!enabled) return;
     static_frame += dt * 30.0f;
     if (stat.frames) static_frame = fmodf(static_frame, stat.frames);
+    if (cur_open && !info_ready) {
+        LightLock_Lock(&tlock);
+        if (open_gen_pub == req_gen) info = info_pub, info_ready = true;
+        LightLock_Unlock(&tlock);
+        if (info_ready && (!info.ok || info.frames <= 0)) { // a clip that would not open: static stays
+            cur_open = loading = false;
+            static_visible = true;
+        }
+    }
     if (loading) {
         load_time += dt;
-        if (load_time >= STATIC_TIME) { // _start_playback()
+        if (load_time >= STATIC_TIME && info_ready) { // _start_playback()
             static_visible = false;
             loading = false;
             current_frame = 0;
@@ -194,14 +280,14 @@ void thoughts_update(float dt) {
         }
     }
     if (!loading && cur_open) {
-        current_frame += dt * cur.fps;
-        if (current_frame >= cur.frames) {
+        current_frame += dt * info.fps;
+        if (current_frame >= info.frames) {
             current_frame = 0;
             loops++;
-            if (loops > cur.loops) {
+            if (loops > info.loops) {
                 static_visible = true;
                 cur_open = false;
-                clip_close(&cur);
+                request_clip("");
                 current_cat[0] = 0;
                 thoughts_play(fallback_cat); // autoplay_fallback is on everywhere the game uses it
                 return;
@@ -214,11 +300,11 @@ bool thoughts_image(C2D_Image *out) {
     if (!enabled) return false;
     if (static_visible || !cur_open) {
         if (!stat.frames) return false;
-        show(&stat, (int)static_frame % stat.frames);
+        show(0, (int)static_frame % stat.frames);
     } else {
         int fr = (int)current_frame;
-        if (fr >= cur.frames) fr = cur.frames - 1;
-        show(&cur, fr);
+        if (fr >= info.frames) fr = info.frames - 1;
+        show(1, fr);
     }
     out->tex = &tex[tex_cur];
     out->subtex = &subtex;

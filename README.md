@@ -24,6 +24,8 @@ SOURCE=/path/to/uncanny-cat-golf-source ./build.sh convert
 ./build.sh gimtest 1    # tries shots at every World 1 gimmick
 ```
 
+`./build.sh 3ds PROFILE=1` builds a copy that writes `sdmc:/ucg_prof.txt`: every frame whose work takes over 12 ms, split into parts, to find stutters. Music, sound decoding, the thoughts clips and save writes run on a second thread (`source/worker.c`); level loads happen while the screen is faded to black.
+
 ## When the game gets an update
 
 See [UPDATING.md](UPDATING.md): `python tools/game_update.py diff <new source>` lists what changed and which port code each changed script maps to.

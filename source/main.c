@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "prof.h"
+#include "worker.h"
 #include "audio.h"
 #include "game.h"
 #include "save.h"
@@ -223,7 +225,7 @@ static void save_settings(void) {
     cfg_set_int(config, "3DS", "jumpscares", set.jumpscares);
     cfg_set_int(config, "3DS", "show_fps", set.show_fps);
     cfg_set_int(config, "3DS", "course_zoom", set.zoom);
-    cfg_write(config);
+    cfg_write_later(config);
 }
 
 static GameSettings game_settings(void) {
@@ -246,7 +248,9 @@ static void record_result(const char *id, int score, float time, int rank, int s
     snprintf(k, sizeof(k), "%s_time", id);
     float bt = cfg_get_float(savedata, "LEVELS", k, 1e9f);
     if (time < bt) cfg_set_float(savedata, "LEVELS", k, time);
-    cfg_write(savedata);
+    PROF_BEGIN("save write");
+    cfg_write_later(savedata);
+    PROF_END();
 }
 
 // ---------------------------------------------------------------- app state
@@ -268,7 +272,9 @@ static vec2 last_touch;
 static bool dragging;
 static int pause_cursor, set_cursor, set_scroll;
 enum { STOUCH_NONE, STOUCH_PENDING, STOUCH_SCROLL, STOUCH_SLIDER };
-static int set_touch, set_touch_row, set_touch_scroll; // stylus in settings: tap, list drag or slider drag
+static float btn_alpha[3] = {1, 1, 1}; // how see-through each course button is (pause, restart, skip)
+static int set_touch, set_touch_row; // stylus in settings: tap, list drag or slider drag
+static float set_pos, set_touch_pos, set_vel, set_last_y; // the list's scroll in pixels, drag start, fling speed
 static vec2 set_touch_at;
 static float rainbow_t;
 static int fps_shown, fps_count;
@@ -323,7 +329,15 @@ static void to_select(void) {
     thoughts_play("Idle");
 }
 
+static bool start_level_(int w, int l);
 static bool start_level(int w, int l) {
+    PROF_BEGIN("level load");
+    bool ok = start_level_(w, l);
+    PROF_END();
+    return ok;
+}
+
+static bool start_level_(int w, int l) {
     unload_level();
     char path[128];
     snprintf(path, sizeof(path), "romfs:/levels/w%d/%s.txt", w, wnames[w][l]);
@@ -346,6 +360,7 @@ static bool start_level(int w, int l) {
     game_start(&game, &level, MODE_NORMAL, &gset);
     camera_follow(game.pos, true);
     jumpscare_t = results_t = win_t = 0;
+    btn_alpha[0] = btn_alpha[1] = btn_alpha[2] = 1;
     results_stage = 0;
     results_rank_shown = -1;
     dragging = false;
@@ -361,6 +376,48 @@ static void next_level(void) {
     if (cur_level + 1 < wcount[cur_world]) start_level(cur_world, cur_level + 1);
     else if (cur_world + 1 < NWORLDS && wcount[cur_world + 1] > 0) start_level(cur_world + 1, 0);
     else to_select();
+}
+
+// ---------------------------------------------------------------- transitions
+// Screen changes fade through black (the original cuts straight across). The change itself happens
+// on the first frame after the screen is fully black, so a level load's pause is never seen.
+enum { TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS };
+#define TR_OUT (1.0f / 60 / 0.12f) // 0.12 s to black
+#define TR_IN (1.0f / 60 / 0.16f)  // 0.16 s back
+static int tr_phase = 2, tr_act, tr_a, tr_b; // phase 0 idle, 1 going dark, 2 coming back
+static float tr_k = 1;                       // how dark (the game starts on black and fades in)
+
+static void go(int act, int a, int b) {
+    if (tr_phase == 1) return; // one change at a time
+    tr_phase = 1;
+    tr_act = act, tr_a = a, tr_b = b;
+}
+
+static void open_settings(int back);
+static void close_settings_now(void);
+
+static void transition_step(void) {
+    if (tr_phase == 1 && tr_k >= 1) {
+        switch (tr_act) {
+        case TR_START: start_level(tr_a, tr_b); break;
+        case TR_NEXT: next_level(); break;
+        case TR_SELECT: to_select(); break;
+        case TR_SETTINGS: open_settings(tr_a); break;
+        case TR_CLOSE_SETTINGS: close_settings_now(); break;
+        }
+        tr_phase = 2;
+    } else if (tr_phase == 1) {
+        tr_k = fminf(1, tr_k + TR_OUT);
+    } else if (tr_phase == 2) {
+        tr_k -= TR_IN;
+        if (tr_k <= 0) tr_k = 0, tr_phase = 0;
+    }
+}
+
+static void draw_fade(float w) {
+    if (tr_k <= 0) return;
+    float a = tr_k * tr_k * (3 - 2 * tr_k); // smoothstep
+    C2D_DrawRectSolid(0, 0, 1.0f, w, SCR_H, C2D_Color32f(0, 0, 0, a));
 }
 
 // ---------------------------------------------------------------- sounds and thoughts
@@ -628,9 +685,12 @@ static bool pressed_now(float x, float y, float w, float h) {
 // default.tres: button.png nine-patch (margin 16), button_focus.png with the hover
 // modulate when selected, 0.745 while pressed; Arial Rounded, black outline,
 // font colour 0.875 (0.95 when focused)
+static float btn_alpha_now = 1; // the course buttons' see-through amount, for button_box
+
 static void button_box(float x, float y, float w, float h, bool hl) {
     bool pr = pressed_now(x, y, w, h);
-    nine(hl ? "btn_hi" : "btn", x, y, w, h, 16, fminf(12, fminf(w, h) / 3), pr ? grey(0.745f) : WHITE);
+    float g = pr ? 0.745f : 1;
+    nine(hl ? "btn_hi" : "btn", x, y, w, h, 16, fminf(12, fminf(w, h) / 3), C2D_Color32f(g, g, g, btn_alpha_now));
 }
 
 static void button(float x, float y, float w, float h, const char *label, bool hl) {
@@ -691,6 +751,32 @@ static void popup_text(vec2 world, int score, float popup) {
     snprintf(b, sizeof(b), "%d", score);
     vec2 p = world_to_screen(world);
     text_ol(p.x, p.y - 14 - (1 - popup) * 10, 0.45f, C2D_Color32(255, 255, 120, 255), C2D_AlignCenter, b);
+}
+
+// is a circle (world centre, world radius) over a screen rect?
+static bool circle_under(vec2 world, float r, float x, float y, float w, float h) {
+    vec2 c = world_to_screen(world);
+    float rr = r * course_scale();
+    float nx = fmaxf(x, fminf(c.x, x + w)), ny = fmaxf(y, fminf(c.y, y + h));
+    return (c.x - nx) * (c.x - nx) + (c.y - ny) * (c.y - ny) < rr * rr;
+}
+
+// anything that moves or can be picked up, under a button: the cat, ghosts, keys, skulls, coins, the goal
+static bool course_under(float x, float y, float w, float h) {
+    if (game.sprite_visible && circle_under(game.pos, PLAYER_RADIUS * 1.4f * game.sprite_scale / 0.064f, x, y, w, h))
+        return true;
+    for (int i = 0; i < game.nghosts; i++)
+        if (game.ghosts[i].alive && circle_under(game.ghosts[i].pos, PLAYER_RADIUS * 1.6f, x, y, w, h)) return true;
+    for (int i = 0; i < game.nkeys; i++)
+        if (game.keys[i].alive && circle_under(game.keys[i].pos, 18, x, y, w, h)) return true;
+    for (int i = 0; i < game.nbodies; i++)
+        if (game.bodies[i].alive && game.bodies[i].type == OBJ_SKULL &&
+            circle_under(game.bodies[i].pos, game.bodies[i].radius + 4, x, y, w, h))
+            return true;
+    for (int i = 0; i < game.ncoins; i++)
+        if (!game.coins[i].taken && circle_under(game.coins[i].pos, game.coins[i].r + 4, x, y, w, h)) return true;
+    if (game.has_goal && circle_under(game.goal_pos, 20, x, y, w, h)) return true;
+    return false;
 }
 
 static void draw_course(void) {
@@ -764,27 +850,37 @@ static void draw_course(void) {
         C2D_DrawRectSolid(0, 0, 0.8f, COURSE_X, SCR_H, BLACK);
         C2D_DrawRectSolid(COURSE_X + COURSE_W, 0, 0.8f, COURSE_X, SCR_H, BLACK);
     }
+    // the buttons: in the zoomed view they sit over the course, and go see-through while
+    // the cat or anything else is behind one
     ui_z = 0.85f;
     float px = strip_x(2, 36), rx = strip_x(282, 36);
+    float bx[3] = {px, rx, rx}, by[3] = {4, 4, 196};
+    for (int b = 0; b < 3; b++) {
+        float want = set.zoom && course_under(bx[b], by[b], 36, 40) ? 0.35f : 1;
+        btn_alpha[b] += (want - btn_alpha[b]) * 0.2f;
+        if (fabsf(want - btn_alpha[b]) < 0.01f) btn_alpha[b] = want;
+    }
+    btn_alpha_now = btn_alpha[0];
     button_box(px, 4, 36, 40, false);
+    btn_alpha_now = btn_alpha[1];
     button_box(rx, 4, 36, 40, false);
     ui_z = 0.86f;
-    draw_hud("pause_icon", px + 18, 24, 0.3f, WHITE);
-    text(rx + 18, 24 - 0.85f * lf_sys * 0.5f, 0.85f, grey(0.2f), C2D_AlignCenter, ""); // the Y button
+    draw_hud("pause_icon", px + 18, 24, 0.3f, C2D_Color32f(1, 1, 1, btn_alpha[0]));
+    text(rx + 18, 24 - 0.85f * lf_sys * 0.5f, 0.85f, C2D_Color32f(0.2f, 0.2f, 0.2f, btn_alpha[1]), C2D_AlignCenter,
+         ""); // the Y button
     if (!(level.flags & LF_UNSKIPPABLE)) {
         ui_z = 0.85f;
+        btn_alpha_now = btn_alpha[2];
         button_box(rx, 196, 36, 40, game.skipcounter > 0);
         ui_z = 0.86f;
         char sk[8];
         snprintf(sk, sizeof(sk), "skip%d", game.skipcounter > 0 ? 1 + (int)(rainbow_t * 6) % 2 : 0);
-        draw_hud(sk, rx + 18, 216, 0.62f, WHITE);
+        draw_hud(sk, rx + 18, 216, 0.62f, C2D_Color32f(1, 1, 1, btn_alpha[2]));
         if (game.skipcounter > 0)
-            C2D_DrawRectSolid(rx + 2, 191, 0.9f, 32 * game.skipcounter / (float)SKIPCOUNT, 3, C2D_Color32f(1, 0.98f, 0.4f, 1));
+            C2D_DrawRectSolid(rx + 2, 191, 0.9f, 32 * game.skipcounter / (float)SKIPCOUNT, 3,
+                              C2D_Color32f(1, 0.98f, 0.4f, btn_alpha[2]));
     }
-    if (set.zoom && game.sprite_visible) { // the buttons sit over the course here: keep the cat in front
-        ui_z = 0.88f;
-        draw_sprite("costume_canny", world_to_screen(game.pos), k, game.sprite_scale / 0.064f, shade_color(1), 0);
-    }
+    btn_alpha_now = 1;
 }
 
 // ---------------------------------------------------------------- top screen
@@ -802,7 +898,10 @@ static void draw_displayer(void) {
     C2D_DrawRectSolid(DCX - 62.9f, DCY - 83.5f, 0.2f, 124.7f, 101.8f, C2D_Color32(23, 23, 23, 255));
     C2D_Image img;
     float tw = 109 * 1.01f * DK, th = 89 * 1.01f * DK;
-    if (thoughts_image(&img)) C2D_DrawImageAt(img, DCX - 1.14f - tw / 2, DCY - 33.2f - th / 2, 0.25f, NULL, tw / 109, th / 89);
+    PROF_BEGIN("thought frame");
+    bool have_img = thoughts_image(&img);
+    PROF_END();
+    if (have_img) C2D_DrawImageAt(img, DCX - 1.14f - tw / 2, DCY - 33.2f - th / 2, 0.25f, NULL, tw / 109, th / 89);
     else draw_sprite("costume_canny", v2(DCX - 1, DCY - 33), 1.6f, 1, WHITE, 0);
     ui_z = 0.3f;
     draw_hud("displayer", DCX, DCY, 1, WHITE);
@@ -947,9 +1046,9 @@ static void draw_results_top(void) {
         ui_z = 0.55f;
         char rn[16];
         snprintf(rn, sizeof(rn), "rank_%d", game.rank);
-        // Results/Calculated/Rank sits 96 px right and 12 px below the board's centre (bg at 512, 260
-        // scaled to 480x440; ours is 392x236)
-        draw_hud(rn, 200 + 96 * 392 / 480.0f, 108 + oy, 1, WHITE);
+        // centred in the board's free right part: between the score lines (they end near x 140) and the
+        // chalkboard's right edge (382), and between the title (42) and the rank bar (188)
+        draw_hud(rn, (140 + 382) / 2.0f, (42 + 188) / 2.0f + oy, 1, WHITE);
         ui_z = 0.6f;
         if (game.rank < 5) {
             snprintf(v, sizeof(v), "%d", level.ranks[game.rank + 1] - game.final_score);
@@ -1182,16 +1281,19 @@ static void open_settings(int back) {
     settings_back = back;
     set_cursor = 0;
     set_scroll = 0;
+    set_pos = 0;
     set_touch = STOUCH_NONE;
     state = ST_SETTINGS;
 }
 
-static void close_settings(void) {
+static void close_settings_now(void) {
     save_settings();
     gset = game_settings();
     game.set = gset;
     state = settings_back;
 }
+
+static void close_settings(void) { go(TR_CLOSE_SETTINGS, 0, 0); }
 
 // settings.tres: SuperBubble labels, toggle_normal.png boxes (modulate 1.39 when
 // focused, so the others sit darker here), on.png/off.png checks, slider.png
@@ -1215,21 +1317,26 @@ static bool set_slider(int i, float *frac) {
 #define SET_H 26.0f
 #define SET_CTRL_X 186.0f
 
+#define SET_MAXPOS ((SET_COUNT - SET_ROWS) * SET_STEP)
+#define SET_LIST_END (SET_Y + SET_ROWS * SET_STEP - 2) // rows are cut off past here
+
+// the settings background between y0 and y1 (or black without the picture)
+static void settings_bg_band(float y0, float y1) {
+    if (settings_bg)
+        draw_img_part(C2D_SpriteSheetGetImage(settings_bg, 0), 0, y0, BOT_W, y1 - y0, 0, y0, BOT_W, y1 - y0, WHITE);
+    else
+        C2D_DrawRectSolid(0, y0, ui_z, BOT_W, y1 - y0, BLACK);
+}
+
 static void draw_settings(void) {
     char v[48];
-    if (settings_bg) {
-        ui_z = 0.9f;
-        draw_img_part(C2D_SpriteSheetGetImage(settings_bg, 0), 0, 0, BOT_W, SCR_H, 0, 0, BOT_W, SCR_H, WHITE);
-    } else {
-        C2D_DrawRectSolid(0, 0, 0.9f, BOT_W, SCR_H, BLACK);
-    }
-    ui_z = 0.92f;
-    cur_font = font_bubble;
-    text_ol(160, 2, 0.62f, WHITE, C2D_AlignCenter, tr("MENU_Settings"));
-    for (int r = 0; r < SET_ROWS; r++) {
-        int i = set_scroll + r;
-        if (i >= SET_COUNT) break;
-        float y = SET_Y + r * SET_STEP;
+    ui_z = 0.9f;
+    settings_bg_band(0, SCR_H);
+    // rows scroll by the pixel; the title band and the bottom edge are drawn again over them
+    int first = (int)floorf(set_pos / SET_STEP);
+    for (int i = first < 0 ? 0 : first; i < SET_COUNT && i <= first + SET_ROWS; i++) {
+        float y = SET_Y + i * SET_STEP - set_pos;
+        if (y + SET_H < SET_Y - 4 || y > SET_LIST_END) continue;
         bool hl = i == set_cursor;
         ui_z = 0.92f;
         if (i == SET_BACK) {
@@ -1261,11 +1368,17 @@ static void draw_settings(void) {
             arrow_lr(306, y + SET_H / 2, 5, 1);
         }
     }
+    ui_z = 0.955f;
+    settings_bg_band(0, SET_Y - 2);
+    settings_bg_band(SET_LIST_END, SCR_H);
+    ui_z = 0.96f;
+    cur_font = font_bubble;
+    text_ol(160, 2, 0.62f, WHITE, C2D_AlignCenter, tr("MENU_Settings"));
     cur_font = font_ui;
     // more rows above/below
-    ui_z = 0.95f;
-    if (set_scroll > 0) arrow(304, 14, 6, 1);
-    if (set_scroll + SET_ROWS < SET_COUNT) arrow(304, 230, 6, -1);
+    ui_z = 0.97f;
+    if (set_pos > 1) arrow(304, 14, 6, 1);
+    if (set_pos < SET_MAXPOS - 1) arrow(304, 236, 5, -1);
 }
 
 static void draw_settings_top(void) {
@@ -1290,11 +1403,18 @@ static void slider_to(int i, float x) {
 
 // the row under a point, or -1
 static int set_row_at(vec2 t) {
-    for (int r = 0; r < SET_ROWS; r++) {
-        int i = set_scroll + r;
-        if (i < SET_COUNT && hit_box(t, 4, SET_Y + r * SET_STEP, 312, SET_H)) return i;
-    }
+    if (t.y < SET_Y - 2 || t.y >= SET_LIST_END) return -1;
+    for (int i = 0; i < SET_COUNT; i++)
+        if (hit_box(t, 4, SET_Y + i * SET_STEP - set_pos, 312, SET_H)) return i;
     return -1;
+}
+
+// keep the cursor on a row that is mostly on screen
+static void set_cursor_in_view(void) {
+    int top = (int)ceilf(set_pos / SET_STEP - 0.4f), bottom = top + SET_ROWS - 1;
+    if (set_cursor < top) set_cursor = top;
+    if (set_cursor > bottom) set_cursor = bottom;
+    if (set_cursor >= SET_COUNT) set_cursor = SET_COUNT - 1;
 }
 
 // a stylus tap that did not turn into a drag, acted on when the stylus lifts
@@ -1304,7 +1424,7 @@ static bool settings_tap(vec2 t) {
         if (set_cursor >= set_scroll + SET_ROWS) set_cursor = set_scroll + SET_ROWS - 1;
         return false;
     }
-    if (t.y >= SET_Y + SET_ROWS * SET_STEP - 4) {
+    if (t.y >= SET_LIST_END) {
         if (set_scroll + SET_ROWS < SET_COUNT) set_scroll++;
         if (set_cursor < set_scroll) set_cursor = set_scroll;
         return false;
@@ -1313,7 +1433,7 @@ static bool settings_tap(vec2 t) {
     if (i < 0) return false;
     set_cursor = i;
     if (i == SET_BACK) {
-        tap_box(t, 50, SET_Y + (i - set_scroll) * SET_STEP, 220, SET_H);
+        tap_box(t, 50, SET_Y + i * SET_STEP - set_pos, 220, SET_H);
         close_settings();
         return true;
     }
@@ -1342,7 +1462,9 @@ static void settings_input(u32 kd, bool tdown, bool theld, bool tup, vec2 touch)
 
     if (tdown) {
         set_touch_at = touch;
-        set_touch_scroll = set_scroll;
+        set_touch_pos = set_pos;
+        set_last_y = touch.y;
+        set_vel = 0;
         int i = set_row_at(touch);
         float frac;
         if (i >= 0 && touch.x >= SET_CTRL_X && set_slider(i, &frac)) {
@@ -1359,24 +1481,37 @@ static void settings_input(u32 kd, bool tdown, bool theld, bool tup, vec2 touch)
     } else if (theld && set_touch != STOUCH_NONE) {
         float dy = touch.y - set_touch_at.y;
         if (set_touch == STOUCH_PENDING && fabsf(dy) > 6) set_touch = STOUCH_SCROLL;
-        if (set_touch == STOUCH_SCROLL) { // drag the list; the cursor stays on a visible row
-            int sc = set_touch_scroll - (int)roundf(dy / SET_STEP);
-            int maxs = SET_COUNT - SET_ROWS;
-            set_scroll = sc < 0 ? 0 : sc > maxs ? maxs : sc;
-            if (set_cursor < set_scroll) set_cursor = set_scroll;
-            if (set_cursor >= set_scroll + SET_ROWS) set_cursor = set_scroll + SET_ROWS - 1;
+        if (set_touch == STOUCH_SCROLL) { // the list follows the stylus, stretching a little past its ends
+            float p = set_touch_pos - dy;
+            if (p < 0) p /= 3;
+            if (p > SET_MAXPOS) p = SET_MAXPOS + (p - SET_MAXPOS) / 3;
+            set_pos = p;
+            set_vel = set_vel * 0.5f + (set_last_y - touch.y) * 0.5f;
+            set_last_y = touch.y;
+            set_cursor_in_view();
         }
     }
     if (tup) {
         int was = set_touch;
         set_touch = STOUCH_NONE;
+        if (was == STOUCH_SCROLL) { // let go: carry on a little with the stylus's speed, then settle on a row
+            int sc = (int)roundf((set_pos + set_vel * 6) / SET_STEP);
+            int maxs = SET_COUNT - SET_ROWS;
+            set_scroll = sc < 0 ? 0 : sc > maxs ? maxs : sc;
+        }
         if (was == STOUCH_PENDING && settings_tap(set_touch_at)) return;
+    }
+    if (set_touch != STOUCH_SCROLL) { // glide to the row the list rests on
+        float target = set_scroll * SET_STEP;
+        set_pos += (target - set_pos) * 0.25f;
+        if (fabsf(target - set_pos) < 0.3f) set_pos = target;
+        if (set_touch == STOUCH_NONE && fabsf(target - set_pos) > 0.3f) set_cursor_in_view();
     }
 }
 
 // ---------------------------------------------------------------- main
-// every gameplay sound (about 6 MB decoded). Decoded one per frame from boot, so none stalls a level the
-// first time it plays and the boot screen does not wait for all of them.
+// every gameplay sound (about 6 MB decoded). The worker thread decodes them all from boot, so none stalls
+// a level the first time it plays and the boot screen does not wait for them.
 static const char *const PRELOAD[] = {
     "player/grab.ogg", "player/hit.ogg", "player/wallBump.ogg", "player/push.ogg", "player/cancel.ogg",
     "player/notif.ogg", "player/water_death.ogg", "player/water_splash1.ogg", "player/water_splash2.ogg",
@@ -1385,7 +1520,6 @@ static const char *const PRELOAD[] = {
     "game/levelStart.ogg", "game/levelWin.ogg", "game/resultsDrumroll.ogg", "game/rankAtrocious.ogg",
     "game/rankErm.ogg", "game/rankOK.ogg", "game/rankPeak.ogg", "game/rankSwag.ogg",
     "gimmicks/screamsOfDeadPeople.ogg", "minigame/meowl_die.ogg"};
-static int preload_next;
 
 int main(void) {
     romfsInit();
@@ -1424,20 +1558,24 @@ int main(void) {
     load_settings();
     savedata = cfg_open("save_data.ini");
     apply_settings();
-    for (int i = 0; i < 3; i++) sfx_preload(PRELOAD[i]); // the menu's own sounds
-    preload_next = 3;
+    worker_start();
+    // decoded by the worker, the menu's own sounds first, so no sound is decoded mid-game
+    for (int i = 0; i < (int)(sizeof(PRELOAD) / sizeof(PRELOAD[0])); i++) sfx_preload(PRELOAD[i]);
     music_play(1);
     thoughts_fallback("Idle");
     thoughts_play("Idle");
     fps_since = osGetTime();
 
+    int frame_no = 0;
     while (aptMainLoop()) {
-        if (preload_next < (int)(sizeof(PRELOAD) / sizeof(PRELOAD[0]))) sfx_preload(PRELOAD[preload_next++]);
+        PROF_FRAME_BEGIN();
         hidScanInput();
         u32 kd = hidKeysDown(), kh = hidKeysHeld(), ku = hidKeysUp();
         touchPosition tp;
         hidTouchRead(&tp);
         vec2 touch = v2(tp.px, tp.py);
+        transition_step();
+        if (tr_phase) kd = kh = ku = 0; // no input while the screen changes
         bool tdown = kd & KEY_TOUCH, theld = kh & KEY_TOUCH, tup = ku & KEY_TOUCH;
         if (theld) last_touch = touch;
 
@@ -1454,15 +1592,15 @@ int main(void) {
                     sel_cursor = last < n ? last : last - GRID_COLS;
                 }
             }
-            bool go = kd & KEY_A;
-            if (kd & KEY_SELECT) open_settings(ST_SELECT);
+            bool play = kd & KEY_A;
+            if (kd & KEY_SELECT) go(TR_SETTINGS, ST_SELECT, 0);
             else if (tdown) {
-                if (tap_box(touch, 232, 4, 84, 28)) open_settings(ST_SELECT);
+                if (tap_box(touch, 232, 4, 84, 28)) go(TR_SETTINGS, ST_SELECT, 0);
                 else if (tap_box(touch, WBTN_X, 44, 60, 40)) dw = -1;
                 else if (tap_box(touch, WBTN_X, 90, 60, 40)) dw = 1;
                 else if (v2len(v2sub(touch, v2(GO_X, GO_Y))) < 32) {
                     tap_box(touch, GO_X - 32, GO_Y - 32, 64, 64);
-                    go = true;
+                    play = true;
                 } else if (sel_rows() > GRID_ROWS && hit_box(touch, SBAR_X - 4, GRID_Y, 18, GRID_ROWS * CELL)) {
                     // the scrollbar: a row up or down, the cursor follows
                     float hh = (GRID_ROWS * CELL - 4) * GRID_ROWS / sel_rows();
@@ -1479,7 +1617,7 @@ int main(void) {
                             float x = GRID_X + c * CELL, y = GRID_Y + r * CELL;
                             if (i < n && tap_box(touch, x, y, CELL - 4, CELL - 4)) {
                                 // the first tap selects (its stats show on top), a second one plays
-                                if (i == sel_cursor) go = true;
+                                if (i == sel_cursor) play = true;
                                 sel_cursor = i;
                                 sfx_play("player/grab.ogg", 1, 1);
                             }
@@ -1491,9 +1629,9 @@ int main(void) {
                 while (!wcount[w]);
                 sel_world = w;
                 sel_cursor = sel_scroll = 0;
-                go = false;
+                play = false;
             }
-            if (go && state == ST_SELECT) start_level(sel_world, sel_cursor);
+            if (play && state == ST_SELECT) go(TR_START, sel_world, sel_cursor);
             if (state == ST_SELECT) {
                 int row = sel_cursor / GRID_COLS;
                 if (row < sel_scroll) sel_scroll = row;
@@ -1512,9 +1650,9 @@ int main(void) {
                 for (int i = 0; i < 4; i++)
                     if (tap_box(touch, PAUSE_X, PAUSE_Y + i * PAUSE_STEP, PAUSE_W, PAUSE_H)) pick = i;
             if (pick == 0) state = ST_PLAY;
-            else if (pick == 1) start_level(cur_world, cur_level);
-            else if (pick == 2) open_settings(ST_PAUSE);
-            else if (pick == 3) to_select();
+            else if (pick == 1) go(TR_START, cur_world, cur_level);
+            else if (pick == 2) go(TR_SETTINGS, ST_PAUSE, 0);
+            else if (pick == 3) go(TR_SELECT, 0, 0);
         } else if (state == ST_PLAY) {
             GameInput in;
             memset(&in, 0, sizeof(in));
@@ -1561,9 +1699,9 @@ int main(void) {
                 if (results_stage == 1 && results_t >= 30 + 144) results_stage = 2;
                 if ((in.click_pressed || (kd & KEY_A)) && win_t > 40) {
                     if (results_stage < 2) results_stage = 2, results_t = 30 + 144;
-                    else next_level();
+                    else go(TR_NEXT, 0, 0);
                 }
-                if (in.restart_pressed) start_level(cur_world, cur_level);
+                if (in.restart_pressed) go(TR_START, cur_world, cur_level);
                 if (state == ST_PLAY && game.victory) {
                     game_tick(&game, &(GameInput){0});
                     camera_follow(game.pos, false);
@@ -1591,20 +1729,25 @@ int main(void) {
                     state = ST_PAUSE;
                     pause_cursor = 0;
                 }
-                if (game.progress == PROG_RESET || game.progress == PROG_WIN_RESET) start_level(cur_world, cur_level);
-                else if (game.progress == PROG_SKIP) next_level();
+                if (game.progress == PROG_RESET || game.progress == PROG_WIN_RESET) go(TR_START, cur_world, cur_level);
+                else if (game.progress == PROG_SKIP) go(TR_NEXT, 0, 0);
             }
             if (jumpscare_t > 0) jumpscare_t--;
         }
 
+        PROF_MARK("logic");
         music_update();
+        PROF_MARK("music");
         thoughts_update(1.0f / 60);
+        PROF_MARK("thoughts");
         rainbow_t += 1.0f / 60;
         if (press_t > 0) press_t--;
 
         // ---- draw
         C2D_TextBufClear(tbuf);
+        PROF_MARK("misc");
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        PROF_MARK("~wait gpu");
         C2D_TargetClear(top, C2D_Color32(0, 0, 0, 255));
         C2D_TargetClear(bot, C2D_Color32(0, 0, 0, 255));
 
@@ -1616,6 +1759,7 @@ int main(void) {
         else draw_top_hud();
         ui_z = 0.99f;
         if (jumpscare_t > 0) draw_jumpscare(true);
+        draw_fade(TOP_W);
 
         C2D_SceneBegin(bot);
         ui_z = 0.5f;
@@ -1659,10 +1803,23 @@ int main(void) {
             ui_z = 1.0f;
             text_ol(strip_x(4, 30), 222, 0.45f, C2D_Color32(120, 255, 120, 255), 0, f);
         }
+        draw_fade(BOT_W);
+        PROF_MARK("draw");
         C3D_FrameEnd(0);
+        PROF_MARK("~frame end");
+#if UCG_PROFILE
+        {
+            static const char *SN[] = {"select", "play", "pause", "settings"};
+            char what[48];
+            snprintf(what, sizeof(what), "%s %s%s", SN[state], state == ST_SELECT ? "" : level.id,
+                     game.victory ? " won" : game.lose ? " lost" : "");
+            prof_frame_end(++frame_no, what);
+        }
+#endif
     }
 
     unload_level();
+    worker_stop();
     thoughts_exit();
     audio_exit();
     save_exit();

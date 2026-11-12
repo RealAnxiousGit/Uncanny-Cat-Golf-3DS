@@ -9,5 +9,8 @@ void sfx_play(const char *rel, float pitch, float volume);
 void sfx_preload(const char *rel);
 // Music by the game's Master.Music number (index in romfs:/music/index.txt); -2 stops.
 void music_play(int id);
-void music_update(void);  // call once per frame
+void music_update(void);  // call once per frame (does nothing while the worker runs)
+// the worker thread's share: streams music and decodes queued sounds; true if it did something
+bool audio_bg_step(void);
+void audio_bg_set(bool on);
 void audio_set_volumes(float master, float music, float sound);

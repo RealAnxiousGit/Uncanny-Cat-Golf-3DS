@@ -95,25 +95,96 @@ Cfg *cfg_open(const char *name) {
     return c;
 }
 
-bool cfg_write(Cfg *c) {
-    FILE *f = fopen(c->tmp, "w");
-    if (!f) return false;
-    // sections in first-seen order
+// the whole file as text (cheap: it is all in memory)
+static char *cfg_text(Cfg *c, size_t *len) {
+    size_t cap = 256 + (size_t)c->n * 180, n = 0;
+    char *t = malloc(cap);
+    if (!t) return NULL;
     for (int i = 0; i < c->n; i++) {
         bool seen = false;
         for (int j = 0; j < i && !seen; j++) seen = !strcmp(c->e[j].sec, c->e[i].sec);
         if (seen) continue;
-        fprintf(f, "%s[%s]\n\n", i ? "\n" : "", c->e[i].sec);
+        if (n < cap) n += snprintf(t + n, cap - n, "%s[%s]\n\n", i ? "\n" : "", c->e[i].sec);
         for (int j = i; j < c->n; j++)
-            if (!strcmp(c->e[j].sec, c->e[i].sec)) fprintf(f, "%s=%s\n", c->e[j].key, c->e[j].val);
+            if (!strcmp(c->e[j].sec, c->e[i].sec) && n < cap) n += snprintf(t + n, cap - n, "%s=%s\n", c->e[j].key, c->e[j].val);
     }
-    bool ok = fclose(f) == 0;
+    *len = n < cap ? n : cap - 1;
+    return t;
+}
+
+static bool write_file(const char *path, const char *tmp, const char *t, size_t len) {
+    FILE *f = fopen(tmp, "w");
+    if (!f) return false;
+    bool ok = fwrite(t, 1, len, f) == len;
+    ok = fclose(f) == 0 && ok;
     if (ok) {
-        remove(c->path);
-        ok = rename(c->tmp, c->path) == 0;
+        remove(path);
+        ok = rename(tmp, path) == 0;
     }
     if (cia_save) archiveCommitSaveData("save");
     return ok;
+}
+
+bool cfg_write(Cfg *c) {
+    size_t len;
+    char *t = cfg_text(c, &len);
+    if (!t) return false;
+    bool ok = write_file(c->path, c->tmp, t, len);
+    free(t);
+    return ok;
+}
+
+// Writes from the worker thread: the text is made now, the SD card write happens there.
+// A newer write of the same file replaces one still waiting.
+typedef struct {
+    Cfg *c;
+    char *text;
+    size_t len;
+} Pending;
+#define MAX_PENDING 4
+static Pending pending[MAX_PENDING];
+static LightLock plock;
+static bool plock_ready, async_on;
+
+void save_async(bool on) {
+    if (!plock_ready) LightLock_Init(&plock), plock_ready = true;
+    async_on = on;
+}
+
+void cfg_write_later(Cfg *c) {
+    if (!async_on) {
+        cfg_write(c);
+        return;
+    }
+    size_t len;
+    char *t = cfg_text(c, &len);
+    if (!t) return;
+    LightLock_Lock(&plock);
+    int slot = -1;
+    for (int i = 0; i < MAX_PENDING; i++)
+        if (pending[i].c == c || (slot < 0 && !pending[i].c)) slot = i;
+    if (slot < 0) { // full: should not happen with two files
+        LightLock_Unlock(&plock);
+        write_file(c->path, c->tmp, t, len);
+        free(t);
+        return;
+    }
+    free(pending[slot].c == c ? pending[slot].text : NULL);
+    pending[slot] = (Pending){c, t, len};
+    LightLock_Unlock(&plock);
+}
+
+bool save_bg_step(void) {
+    if (!plock_ready) return false;
+    Pending p = {0};
+    LightLock_Lock(&plock);
+    for (int i = 0; i < MAX_PENDING && !p.c; i++)
+        if (pending[i].c) p = pending[i], pending[i] = (Pending){0};
+    LightLock_Unlock(&plock);
+    if (!p.c) return false;
+    write_file(p.c->path, p.c->tmp, p.text, p.len);
+    free(p.text);
+    return true;
 }
 
 int cfg_get_int(Cfg *c, const char *sec, const char *key, int def) {

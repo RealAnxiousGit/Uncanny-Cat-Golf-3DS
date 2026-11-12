@@ -15,3 +15,6 @@ void thoughts_fallback(const char *category);
 void thoughts_update(float dt);
 // current picture (thought or static); false while the displayer is off
 bool thoughts_image(C2D_Image *out);
+// worker thread: one piece of work (open a clip or unpack a frame); false when idle
+bool thoughts_bg_step(void);
+void thoughts_bg_set(bool on);

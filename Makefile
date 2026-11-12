@@ -29,7 +29,8 @@ ICON			:=	gen/meta/icon.png
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
 CFLAGS	:=	-g -Wall -O2 -mword-relocations -ffunction-sections -fdata-sections $(ARCH)
-CFLAGS	+=	$(INCLUDE) -D__3DS__
+PROFILE	?=	0
+CFLAGS	+=	$(INCLUDE) -D__3DS__ -DUCG_PROFILE=$(PROFILE)
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS	:=	-g $(ARCH)

@@ -168,7 +168,10 @@ def hud_entries(project):
         n = max(1, sheet.size[0] // fw)
         last = sheet.crop(((n - 1) * fw, 0, n * fw, fh))  # the frame the animation ends on
         im = _scaled(last, scale=0.36)
-        e.append(("rank_%d" % r, im, (im.size[0] / 2, im.size[1] / 2)))
+        # anchored on the middle of what is drawn (the frames are not centred: PEAK sits 12 px right)
+        a = np.asarray(im)[..., 3] > 30
+        ys, xs = np.nonzero(a)
+        e.append(("rank_%d" % r, im, ((xs.min() + xs.max() + 1) / 2, (ys.min() + ys.max() + 1) / 2)))
     return e
 
 
