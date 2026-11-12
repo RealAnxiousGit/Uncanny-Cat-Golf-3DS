@@ -4,7 +4,7 @@ A Nintendo 3DS port of [Uncanny Cat Golf](https://slappyhappy2000.itch.io/uncann
 
 **This repository contains no part of the game.** No art, music, sounds, levels or text. Everything the 3DS build shows or plays is converted at build time from the game's own source download on itch.io, which you get yourself.
 
-Status: early work in progress, private. World 0 is playable.
+Status: work in progress, private. Worlds 0 and 1 are playable.
 
 ## How it works
 
@@ -21,9 +21,15 @@ SOURCE=/path/to/uncanny-cat-golf-source ./build.sh convert
 ./build.sh 3ds          # UncannyCatGolf.3dsx
 ./build.sh 3ds cia      # UncannyCatGolf.cia (uses Banner1 by default, BANNER=2 or 3 to change)
 ./build.sh sim          # physics check against the attract demos
+./build.sh gimtest 1    # tries shots at every World 1 gimmick
 ```
+
+## When the game gets an update
+
+See [UPDATING.md](UPDATING.md): `python tools/game_update.py diff <new source>` lists what changed and which port code each changed script maps to.
 
 ## Controls
 
 - Touch anywhere on the course, pull back, and let go to shoot.
-- Pause: the II button or START. Restart: the R button or Y. Skip a level: hold >> or X.
+- Pause: the II button or START. Restart: the Y button (top right) or Y. Skip a level: hold >> or X.
+- L: switch between the zoomed course (fills the bottom screen, follows the cat) and the whole course.

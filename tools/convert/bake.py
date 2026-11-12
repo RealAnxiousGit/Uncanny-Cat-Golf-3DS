@@ -10,6 +10,7 @@ import os
 import numpy as np
 from PIL import Image
 
+import rewords
 import scene as S
 from scene import Ext, Sub
 
@@ -27,7 +28,7 @@ class TexCache:
         key = ("img", path)
         if key not in self.cache:
             fs = self.project.fs(path)
-            im = Image.open(fs).convert("RGBA")
+            im = rewords.apply(self.project, path, Image.open(fs).convert("RGBA"))
             self.cache[key] = np.asarray(im, dtype=np.float32) / 255.0
         return self.cache[key]
 

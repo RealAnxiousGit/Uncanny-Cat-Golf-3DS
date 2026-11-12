@@ -174,11 +174,12 @@ typedef struct {
     bool thoughts;        // Cat Thought Displayer on the top screen
     int jumpscares;       // 0 on, 1 quiet, 2 off
     bool show_fps;
+    bool zoom;            // course fills the bottom screen's width and follows the cat
     int master, music, sound; // 0..100
     int lang;
 } AppSettings;
 
-static AppSettings set = {10, false, true, false, false, true, 0, false, 100, 100, 100, 0};
+static AppSettings set = {10, false, true, false, false, true, 0, false, true, 100, 100, 100, 0};
 static Cfg *config, *savedata;
 
 static void apply_settings(void) {
@@ -205,6 +206,7 @@ static void load_settings(void) {
     set.thoughts = cfg_get_int(config, "3DS", "thoughts", 1);
     set.jumpscares = cfg_get_int(config, "3DS", "jumpscares", 0) % 3;
     set.show_fps = cfg_get_int(config, "3DS", "show_fps", 0);
+    set.zoom = cfg_get_int(config, "3DS", "course_zoom", 1);
 }
 
 static void save_settings(void) {
@@ -220,6 +222,7 @@ static void save_settings(void) {
     cfg_set_int(config, "3DS", "thoughts", set.thoughts);
     cfg_set_int(config, "3DS", "jumpscares", set.jumpscares);
     cfg_set_int(config, "3DS", "show_fps", set.show_fps);
+    cfg_set_int(config, "3DS", "course_zoom", set.zoom);
     cfg_write(config);
 }
 
@@ -271,18 +274,33 @@ static float rainbow_t;
 static int fps_shown, fps_count;
 static u64 fps_since;
 
-static float course_scale(void) { return COURSE_W / (2.0f * level.bounds); }
+// Fit: the whole course in the 240 px between the side strips. Zoomed: the course is as wide as
+// the screen (320 px) and the view scrolls up and down after the cat (cam_y, in world units).
+static float cam_y;
+static float course_scale(void) { return (set.zoom ? BOT_W : COURSE_W) / (2.0f * level.bounds); }
+static float course_left(void) { return set.zoom ? 0 : COURSE_X; }
+static float course_top(void) { return set.zoom ? SCR_H / 2 - (cam_y + level.bounds) * course_scale() : 0; }
+
+// keeps the zoomed view on the cat; snap jumps straight there (level start, view switch)
+static void camera_follow(vec2 target, bool snap) {
+    float half = SCR_H / 2 / course_scale(), lim = level.bounds - half;
+    float want = lim > 0 ? clampf(target.y, -lim, lim) : 0;
+    cam_y = snap ? want : cam_y + (want - cam_y) * 0.12f;
+}
 
 static vec2 world_to_screen(vec2 w) {
     float k = course_scale();
     float x = (w.x + level.bounds) * k;
-    if (level.flags & LF_MIRROR) x = COURSE_W - x;
-    return v2(COURSE_X + x, (w.y + level.bounds) * k);
+    if (level.flags & LF_MIRROR) x = 2 * level.bounds * k - x;
+    return v2(course_left() + x, course_top() + (w.y + level.bounds) * k);
 }
 
 // touch (bottom screen px) -> the original's viewport px (course = 0..512)
+// stylus pixels to the original's viewport pixels (256 / bounds of them per world unit); shots
+// only use differences, so the origin does not matter
 static vec2 touch_to_viewport(vec2 t) {
-    return v2((t.x - COURSE_X) * 512.0f / COURSE_W, t.y * 512.0f / COURSE_W);
+    float f = 256.0f / (level.bounds * course_scale());
+    return v2(t.x * f, t.y * f);
 }
 
 // side strip buttons; the left-handed layout mirrors them
@@ -326,6 +344,7 @@ static bool start_level(int w, int l) {
     game.ndemo = 0;
     gset = game_settings();
     game_start(&game, &level, MODE_NORMAL, &gset);
+    camera_follow(game.pos, true);
     jumpscare_t = results_t = win_t = 0;
     results_stage = 0;
     results_rank_shown = -1;
@@ -412,7 +431,12 @@ static C2D_Font font_for(const char *s) {
     return cur_font;
 }
 
-static float font_k(C2D_Font f, float size) { return size * lf_sys / C2D_FontGetInfo(f)->lineFeed; }
+// Comic Sans (every game font) has a tall line for its letters and a thin stroke, so it is drawn a
+// quarter larger than the line-height match to read like the original's Arial Rounded / SuperBubble
+#define FONT_GROW 1.3f
+static float font_k(C2D_Font f, float size) {
+    return size * lf_sys / C2D_FontGetInfo(f)->lineFeed * (f ? FONT_GROW : 1);
+}
 
 static void str_draw(float x, float y, float size, u32 color, u32 flags, float width, const char *s, bool ol) {
     C2D_Text t;
@@ -427,6 +451,8 @@ static void str_draw(float x, float y, float size, u32 color, u32 flags, float w
             C2D_DrawText(&t, C2D_WithColor | flags, x + o[i][0] * r, y + o[i][1] * r, ui_z, k, k, ol_color, width);
     }
     C2D_DrawText(&t, C2D_WithColor | flags, x, y, ui_z + 0.001f, k, k, color, width);
+    if (f) // Comic Sans Regular is the only cut the game ships: a second strike half a pixel over makes it bold
+        C2D_DrawText(&t, C2D_WithColor | flags, x + 0.6f, y, ui_z + 0.002f, k, k, color, width);
 }
 
 static float str_width(float size, const char *s) {
@@ -672,9 +698,9 @@ static void draw_course(void) {
     C2D_DrawRectSolid(0, 0, 0, BOT_W, SCR_H, C2D_Color32(0, 0, 0, 255));
     if (floor_u) {
         C2D_Image img = C2D_SpriteSheetGetImage(floor_u, 0);
-        float s = COURSE_W / level.image_size;
-        if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, COURSE_X + COURSE_W, 0, 0.1f, NULL, -s, s);
-        else C2D_DrawImageAt(img, COURSE_X, 0, 0.1f, NULL, s, s);
+        float cw = 2 * level.bounds * k, s = cw / level.image_size;
+        if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.1f, NULL, -s, s);
+        else C2D_DrawImageAt(img, course_left(), course_top(), 0.1f, NULL, s, s);
     }
     if (game.has_goal) draw_sprite("goal", world_to_screen(game.goal_pos), k, 1, shade_color(1), 0);
     for (int i = 0; i < game.ncoins; i++)
@@ -714,9 +740,9 @@ static void draw_course(void) {
     }
     if (floor_o) {
         C2D_Image img = C2D_SpriteSheetGetImage(floor_o, 0);
-        float s = COURSE_W / level.image_size;
-        if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, COURSE_X + COURSE_W, 0, 0.7f, NULL, -s, s);
-        else C2D_DrawImageAt(img, COURSE_X, 0, 0.7f, NULL, s, s);
+        float cw = 2 * level.bounds * k, s = cw / level.image_size;
+        if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.7f, NULL, -s, s);
+        else C2D_DrawImageAt(img, course_left(), course_top(), 0.7f, NULL, s, s);
     }
     // score popups (coins, blocks, doors, keys, skulls)
     ui_z = 0.75f;
@@ -728,7 +754,9 @@ static void draw_course(void) {
         if (game.keys[i].popup > 0) popup_text(game.keys[i].pos, game.keys[i].popup_score, game.keys[i].popup);
     // side strips: a slice of the sidebar background (hud_bg.png), so both screens match
     ui_z = 0.8f;
-    if (top_bg) {
+    if (set.zoom) {
+        // no strips: the buttons sit over the course
+    } else if (top_bg) {
         C2D_Image bg = C2D_SpriteSheetGetImage(top_bg, 0);
         draw_img_part(bg, 240, 0, COURSE_X, SCR_H, 0, 0, COURSE_X, SCR_H, WHITE);
         draw_img_part(bg, 240, 0, COURSE_X, SCR_H, COURSE_X + COURSE_W, 0, COURSE_X, SCR_H, WHITE);
@@ -752,6 +780,10 @@ static void draw_course(void) {
         draw_hud(sk, rx + 18, 216, 0.62f, WHITE);
         if (game.skipcounter > 0)
             C2D_DrawRectSolid(rx + 2, 191, 0.9f, 32 * game.skipcounter / (float)SKIPCOUNT, 3, C2D_Color32f(1, 0.98f, 0.4f, 1));
+    }
+    if (set.zoom && game.sprite_visible) { // the buttons sit over the course here: keep the cat in front
+        ui_z = 0.88f;
+        draw_sprite("costume_canny", world_to_screen(game.pos), k, game.sprite_scale / 0.064f, shade_color(1), 0);
     }
 }
 
@@ -788,7 +820,12 @@ static void draw_top_hud(void) {
         char key[48];
         snprintf(key, sizeof(key), "GAME_Level%s", level.id);
         snprintf(b, sizeof(b), "%s", tr(key));
-        text_ol_wrap(8, 76, 0.5f, WHITE, 0, 168, b);
+        { // one line, shrunk to fit, so a long name never runs into "Level by"
+            float sz = 0.5f, w = str_width(sz, b);
+            if (w > 168) sz = fmaxf(0.3f, sz * 168 / w);
+            if (str_width(sz, b) > 168) text_ol_wrap(8, 72, sz, WHITE, 0, 168, b);
+            else text_ol(8, 80, sz, WHITE, 0, b);
+        }
         snprintf(b, sizeof(b), "Level by: %s", level.author);
         text_ol(90, 104, 0.38f, WHITE, C2D_AlignCenter, b);
         // strokes, with the rainbow fading as strokes go over par (level.gd)
@@ -910,7 +947,9 @@ static void draw_results_top(void) {
         ui_z = 0.55f;
         char rn[16];
         snprintf(rn, sizeof(rn), "rank_%d", game.rank);
-        draw_hud(rn, 300, 100 + oy, 1, WHITE);
+        // Results/Calculated/Rank sits 96 px right and 12 px below the board's centre (bg at 512, 260
+        // scaled to 480x440; ours is 392x236)
+        draw_hud(rn, 200 + 96 * 392 / 480.0f, 108 + oy, 1, WHITE);
         ui_z = 0.6f;
         if (game.rank < 5) {
             snprintf(v, sizeof(v), "%d", level.ranks[game.rank + 1] - game.final_score);
@@ -1049,7 +1088,7 @@ static void draw_pause(void) {
     for (int i = 0; i < 4; i++) button(PAUSE_X, PAUSE_Y + i * PAUSE_STEP, PAUSE_W, PAUSE_H, items[i], i == pause_cursor);
 }
 // ---------------------------------------------------------------- settings menu
-enum { SET_SENS, SET_INVERT, SET_BUFFER, SET_DRAG, SET_LEFT, SET_THOUGHTS, SET_SCARES, SET_FPS,
+enum { SET_SENS, SET_INVERT, SET_BUFFER, SET_DRAG, SET_ZOOM, SET_LEFT, SET_THOUGHTS, SET_SCARES, SET_FPS,
        SET_MASTER, SET_MUSIC, SET_SOUND, SET_LANG, SET_BACK, SET_COUNT };
 #define SET_ROWS 7
 
@@ -1059,6 +1098,7 @@ static const char *set_label(int i) {
     case SET_INVERT: return tr("MENU_SettingsInvertShot");
     case SET_BUFFER: return tr("MENU_SettingsBufferShot");
     case SET_DRAG: return "Drag starts:";
+    case SET_ZOOM: return "Course view:";
     case SET_LEFT: return "Left-handed:";
     case SET_THOUGHTS: return "Thoughts:";
     case SET_SCARES: return "Jumpscares:";
@@ -1077,6 +1117,7 @@ static const char *set_desc(int i) {
     case SET_INVERT: return tr("MENU_SettingsInvertShot_D");
     case SET_BUFFER: return tr("MENU_SettingsBufferShot_D");
     case SET_DRAG: return "Anywhere: start a shot by touching anywhere on the course. On the cat: only a touch on Canny starts one.";
+    case SET_ZOOM: return "Zoomed: the course fills the bottom screen and follows the cat. Fit: the whole course at once. L switches during play.";
     case SET_LEFT: return "Swaps the Pause, Restart and Skip buttons to the other side.";
     case SET_THOUGHTS: return "The Cat Thought Displayer 9000 on the top screen. Off saves a little battery.";
     case SET_SCARES: return "On: the full scare. Quiet: the picture without the scream. Off: neither.";
@@ -1096,6 +1137,7 @@ static void set_value(int i, char *b, size_t n) {
     case SET_INVERT: snprintf(b, n, "%s", onoff[set.invert]); break;
     case SET_BUFFER: snprintf(b, n, "%s", onoff[set.buffer]); break;
     case SET_DRAG: snprintf(b, n, "%s", set.drag_on_cat ? "On the cat" : "Anywhere"); break;
+    case SET_ZOOM: snprintf(b, n, "%s", set.zoom ? "Zoomed" : "Fit"); break;
     case SET_LEFT: snprintf(b, n, "%s", onoff[set.left_handed]); break;
     case SET_THOUGHTS: snprintf(b, n, "%s", onoff[set.thoughts]); break;
     case SET_SCARES: snprintf(b, n, "%s", (const char *[]){"On", "Quiet", "Off"}[set.jumpscares]); break;
@@ -1121,6 +1163,7 @@ static void set_change(int i, int d) {
     case SET_INVERT: set.invert = !set.invert; break;
     case SET_BUFFER: set.buffer = !set.buffer; break;
     case SET_DRAG: set.drag_on_cat = !set.drag_on_cat; break;
+    case SET_ZOOM: set.zoom = !set.zoom; break;
     case SET_LEFT: set.left_handed = !set.left_handed; break;
     case SET_THOUGHTS: set.thoughts = !set.thoughts; thoughts_enable(set.thoughts); thoughts_play("Idle"); break;
     case SET_SCARES: set.jumpscares = (set.jumpscares + 3 + d) % 3; break;
@@ -1475,17 +1518,25 @@ int main(void) {
         } else if (state == ST_PLAY) {
             GameInput in;
             memset(&in, 0, sizeof(in));
-            bool on_course = touch.x >= COURSE_X && touch.x < COURSE_X + COURSE_W;
+            bool on_course = set.zoom || (touch.x >= COURSE_X && touch.x < COURSE_X + COURSE_W);
             if (on_course && set.drag_on_cat && tdown) {
                 vec2 c = world_to_screen(game.pos);
                 on_course = v2len(v2sub(c, touch)) < fmaxf(22.0f, 24 * course_scale());
             }
             bool pause_btn = tdown && hit_box(touch, strip_x(0, 40), 0, 40, 48);
+            if (kd & KEY_L) { // switch between the zoomed and the whole-course view
+                set.zoom = !set.zoom;
+                save_settings();
+                camera_follow(game.pos, true);
+            }
             bool restart_btn = tdown && hit_box(touch, strip_x(280, 40), 0, 40, 48);
             bool skip_btn = theld && hit_box(touch, strip_x(280, 40), 192, 40, 48);
             if (pause_btn) press_mark(strip_x(2, 36), 4, 36, 40);
             if (restart_btn) press_mark(strip_x(282, 36), 4, 36, 40);
-            if (tdown && on_course) dragging = true;
+            // in the zoomed view the buttons sit over the course, so a touch on one is not a shot
+            bool on_button = pause_btn || restart_btn ||
+                             (!(level.flags & LF_UNSKIPPABLE) && hit_box(touch, strip_x(280, 40), 192, 40, 48));
+            if (tdown && on_course && !(set.zoom && on_button)) dragging = true;
             in.mouse = touch_to_viewport(last_touch);
             if (dragging) {
                 in.click_pressed = tdown;
@@ -1515,6 +1566,7 @@ int main(void) {
                 if (in.restart_pressed) start_level(cur_world, cur_level);
                 if (state == ST_PLAY && game.victory) {
                     game_tick(&game, &(GameInput){0});
+                    camera_follow(game.pos, false);
                     win_t++;
                     if (results_stage == 2 && results_rank_shown != game.rank) {
                         results_rank_shown = game.rank;
@@ -1526,6 +1578,7 @@ int main(void) {
                 }
             } else {
                 game_tick(&game, &in);
+                camera_follow(game.pos, false);
                 play_events(game.events);
                 play_thought(game.thought);
                 if (in.skip_down && !(level.flags & LF_UNSKIPPABLE)) thoughts_play("Idle");
@@ -1577,19 +1630,18 @@ int main(void) {
                 static const char *WHY[6] = {"Caught by the uncanny!", "Out of bounds!", "...where are you?",
                                              "Stuck in the wall!", "Horse!", "Splash!"};
                 // the pause menu's dark red wash behind outlined text
-                C2D_DrawRectSolid(COURSE_X, 88, 0.95f, COURSE_W, 64, C2D_Color32f(0.23f, 0, 0, 0.6f));
+                C2D_DrawRectSolid(course_left(), 88, 0.95f, set.zoom ? BOT_W : COURSE_W, 64, C2D_Color32f(0.23f, 0, 0, 0.6f));
                 ui_z = 0.96f;
                 text_ol(160, 94, 0.62f, C2D_Color32(255, 120, 120, 255), C2D_AlignCenter, WHY[game.death_type]);
                 text_ol(160, 124, 0.45f, grey(0.95f), C2D_AlignCenter, "Tap to try again");
             }
             if (game.victory && results_stage >= 2 && state == ST_PLAY) {
-                C2D_DrawRectSolid(COURSE_X, 60, 0.95f, COURSE_W, 120, C2D_Color32f(0, 0, 0, 0.55f));
                 ui_z = 0.96f;
                 char rn[16];
-                snprintf(rn, sizeof(rn), "rs_%d", game.rank);
-                if (spr_find(rn) >= 0) draw_hud(rn, 160, 110, 1.3f, WHITE);
+                snprintf(rn, sizeof(rn), "rsb_%d", game.rank); // 128x100 badge, about 186x145 here
+                if (spr_find(rn) >= 0) draw_hud(rn, 160, 102, 1.45f, WHITE);
                 else text_ol(160, 84, 1.0f, C2D_Color32f(1, 0.98f, 0.4f, 1), C2D_AlignCenter, RANK_NAMES[game.rank]);
-                text_ol(160, 152, 0.45f, grey(0.95f), C2D_AlignCenter, "Tap for the next level");
+                text_ol(160, 196, 0.45f, grey(0.95f), C2D_AlignCenter, "Tap for the next level");
             }
             ui_z = 0.99f;
             if (jumpscare_t > 0) draw_jumpscare(false);

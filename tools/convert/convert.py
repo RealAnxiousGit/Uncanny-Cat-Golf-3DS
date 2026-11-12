@@ -28,7 +28,20 @@ import hud as HUD  # noqa: E402
 import levels as L  # noqa: E402
 import scene as S  # noqa: E402
 
-EXPECTED_VERSION = "1.0.3b"
+def _ported_version():
+    """The game version the port follows: first line of tools/ported-source.txt (game_update.py)."""
+    rec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ported-source.txt")
+    try:
+        with open(rec, encoding="utf-8") as f:
+            first = f.readline().split()
+        if len(first) == 2 and first[0] == "version":
+            return first[1]
+    except OSError:
+        pass
+    return "1.0.3b"
+
+
+EXPECTED_VERSION = _ported_version()
 LEVEL_DIR = "res://assetsNEW/scenes/game/levels/regular"
 SPRITE_PX_PER_UNIT = 2.0
 TEX3DS = os.path.join(os.environ.get("DEVKITPRO", "/opt/devkitpro"), "tools", "bin", "tex3ds")

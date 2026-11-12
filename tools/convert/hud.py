@@ -177,10 +177,13 @@ def hud_entries(project):
 # level_select.tscn, pause_menu.tscn). Nine-patch pieces keep anchor (0, 0).
 
 # (output name, font file, size in points) for mkbcfnt
+# Every font is the game's own Comic Sans (assetsNEW/fonts/COMIC.TTF), as the user asked; the
+# original faces were Arial Rounded MT Bold (theme), SuperBubble (settings) and Square 721 (level numbers).
+COMIC = "res://assetsNEW/fonts/COMIC.TTF"
 FONTS = [
-    ("ui", "res://assetsNEW/fonts/Arial Rounded MT Bold Regular.ttf", 22),   # the default theme font
-    ("bubble", "res://assetsNEW/fonts/SuperBubble-Rpaj3.ttf", 22),           # settings.tres
-    ("square", "res://assetsNEW/fonts/Square 721 Extended Bold.otf", 22),    # level numbers
+    ("ui", COMIC, 17),     # near the size it is drawn at: shrinking Comic's thin strokes loses them
+    ("bubble", COMIC, 17),
+    ("square", COMIC, 17),
 ]
 
 
@@ -207,6 +210,9 @@ def menu_entries(project):
     for r in range(6):
         im = _scaled(rs.crop((r * fw, 0, (r + 1) * fw, rs.size[1])), scale=0.5)
         e.append(("rs_%d" % r, im, (im.size[0] / 2, im.size[1] / 2)))
+        # full size, for the big badge on the bottom screen's results
+        big = rs.crop((r * fw, 0, (r + 1) * fw, rs.size[1]))
+        e.append(("rsb_%d" % r, big, (big.size[0] / 2, big.size[1] / 2)))
     paused = _scaled(_img(project, h + "paused_new.png"), 240, 80)
     e.append(("paused", paused, (120, 40)))
     e.append(("slider", _img(project, m + "slider.png"), (0, 0)))
