@@ -10,6 +10,26 @@
 #define RECOVER_STEPS 4
 #define CAST_STEPS 8
 
+static Shape *dyn_shapes;
+static int dyn_n;
+static int exclude_idx = -1;
+
+void phys_set_dynamic(Shape *shapes, int n) {
+    dyn_shapes = shapes;
+    dyn_n = n;
+}
+
+void phys_set_exclude(int shape_index) { exclude_idx = shape_index; }
+
+static inline int total_shapes(const LevelDef *lv) { return lv->nshapes + dyn_n; }
+
+// shape i, or NULL when it's switched off / excluded
+static inline const Shape *shape_at(const LevelDef *lv, int i, uint32_t mask) {
+    if (i == exclude_idx) return NULL;
+    const Shape *s = i < lv->nshapes ? &lv->shapes[i] : &dyn_shapes[i - lv->nshapes];
+    return (s->layers & mask) ? s : NULL;
+}
+
 static vec2 closest_on_segment(vec2 p, vec2 a, vec2 b) {
     vec2 ab = v2sub(b, a);
     float l2 = v2len2(ab);
@@ -110,9 +130,9 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
     for (int it = 0; it < RECOVER_STEPS; it++) {
         bool any = false;
         vec2 rec = v2(0, 0);
-        for (int i = 0; i < lv->nshapes; i++) {
-            const Shape *s = &lv->shapes[i];
-            if (!(s->layers & mask) || !box_overlap(s, p.x - reach, p.y - reach, p.x + reach, p.y + reach)) continue;
+        for (int i = 0; i < total_shapes(lv); i++) {
+            const Shape *s = shape_at(lv, i, mask);
+            if (!s || !box_overlap(s, p.x - reach, p.y - reach, p.x + reach, p.y + reach)) continue;
             vec2 n;
             float depth = -separation(s, v2add(p, rec), reach, &n);
             if (depth > MIN_CONTACT_DEPTH) {
@@ -131,9 +151,9 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
         vec2 end = v2add(p, motion);
         float bx0 = fminf(p.x, end.x) - r, by0 = fminf(p.y, end.y) - r;
         float bx1 = fmaxf(p.x, end.x) + r, by1 = fmaxf(p.y, end.y) + r;
-        for (int i = 0; i < lv->nshapes; i++) {
-            const Shape *s = &lv->shapes[i];
-            if (!(s->layers & mask) || !box_overlap(s, bx0, by0, bx1, by1)) continue;
+        for (int i = 0; i < total_shapes(lv); i++) {
+            const Shape *s = shape_at(lv, i, mask);
+            if (!s || !box_overlap(s, bx0, by0, bx1, by1)) continue;
             if (!sweep_hits(s, p, end, r)) continue;
             if (separation(s, p, r, NULL) < 0) { // stuck
                 safe = unsafe = 0;
@@ -163,9 +183,9 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
         float deepest = -1e30f;
         vec2 n = v2(0, -1);
         int who = best;
-        for (int i = 0; i < lv->nshapes; i++) {
-            const Shape *s = &lv->shapes[i];
-            if (!(s->layers & mask) || !box_overlap(s, at.x - reach, at.y - reach, at.x + reach, at.y + reach)) continue;
+        for (int i = 0; i < total_shapes(lv); i++) {
+            const Shape *s = shape_at(lv, i, mask);
+            if (!s || !box_overlap(s, at.x - reach, at.y - reach, at.x + reach, at.y + reach)) continue;
             vec2 nn;
             float depth = -separation(s, at, reach, &nn);
             if (depth > deepest && depth > 0) {
@@ -187,9 +207,9 @@ Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, 
 }
 
 bool phys_point_solid(const LevelDef *lv, vec2 p, uint32_t mask) {
-    for (int i = 0; i < lv->nshapes; i++) {
-        const Shape *s = &lv->shapes[i];
-        if (!(s->layers & mask) || p.x < s->x0 || p.x > s->x1 || p.y < s->y0 || p.y > s->y1) continue;
+    for (int i = 0; i < total_shapes(lv); i++) {
+        const Shape *s = shape_at(lv, i, mask);
+        if (!s || p.x < s->x0 || p.x > s->x1 || p.y < s->y0 || p.y > s->y1) continue;
         if (s->kind == SHAPE_CIRCLE) {
             if (v2len2(v2sub(p, s->c)) < s->r * s->r) return true;
         } else if (point_in_poly(s, p)) {
@@ -197,4 +217,9 @@ bool phys_point_solid(const LevelDef *lv, vec2 p, uint32_t mask) {
         }
     }
     return false;
+}
+
+bool phys_circle_overlaps(const Shape *s, vec2 p, float r) {
+    if (p.x + r < s->x0 || p.x - r > s->x1 || p.y + r < s->y0 || p.y - r > s->y1) return false;
+    return separation(s, p, r, NULL) < 0;
 }

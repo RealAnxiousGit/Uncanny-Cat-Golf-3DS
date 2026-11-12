@@ -192,7 +192,7 @@ AccessControlInfo:
    - y2r:u
 
 SystemControlInfo:
-  SaveDataSize: 0KB
+  SaveDataSize: 512KB
   RemasterVersion: 0
   StackSize: 0x40000
   Dependency:

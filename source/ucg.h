@@ -41,10 +41,10 @@ typedef struct {
 } Shape;
 
 enum {
-    OBJ_PLAYER, OBJ_GOAL, OBJ_GHOST, OBJ_COIN, OBJ_COUNT
+    OBJ_PLAYER, OBJ_GOAL, OBJ_GHOST, OBJ_COIN, OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_KEY, OBJ_SKULL, OBJ_COUNT
 };
 
-#define MAX_PARAMS 8
+#define MAX_PARAMS 16
 typedef struct {
     int type;
     vec2 pos;
@@ -54,6 +54,13 @@ typedef struct {
     char pkey[MAX_PARAMS][24];
     float pval[MAX_PARAMS];
 } ObjDef;
+
+// Area zones (outline only; their art is in the floor picture)
+enum { ZONE_SAND = 1, ZONE_WATER = 2 };
+
+// Pictures of dynamic objects in <id>_d.t3x
+typedef struct { int w, h; float ax, ay; } DynSprite;
+#define MAX_DSPR 64
 
 enum {
     LF_ALWAYS_OB = 1, LF_NEVER_OB = 2, LF_MIRROR = 4, LF_HIDE_SCORING = 8, LF_UNSKIPPABLE = 16,
@@ -75,6 +82,10 @@ typedef struct {
     Shape *shapes;
     int nobjs;
     ObjDef *objs;
+    int nzones;
+    Shape *zones; // layers holds the ZONE_ kind
+    int ndspr;
+    DynSprite dspr[MAX_DSPR];
 } LevelDef;
 
 bool level_load(LevelDef *lv, const char *path);
@@ -89,6 +100,14 @@ typedef struct {
     float travel_frac;
 } Collision;
 
+// Moving and removable bodies (blocks, doors, skulls) checked along with the level's
+// shapes. Their indices follow the level's: shape lv->nshapes + i is dynamic shape i.
+// A dynamic shape with layers 0 is switched off. exclude skips one shape (a body's own).
+void phys_set_dynamic(Shape *shapes, int n);
+void phys_set_exclude(int shape_index);
+void shape_update_bbox(Shape *s);
+// true if a circle overlaps the shape (Area2D overlap)
+bool phys_circle_overlaps(const Shape *s, vec2 p, float r);
 // Godot-style move_and_collide for a circle. Moves *pos, returns contact info.
 Collision phys_move_circle(const LevelDef *lv, vec2 *pos, float r, vec2 motion, uint32_t mask);
 // true if the point is inside any shape on the given layers

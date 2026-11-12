@@ -1,7 +1,10 @@
 // Gameplay for one level. See game.h for where each part comes from.
 #include "game.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+#define PI_F 3.14159265f
 
 #define HUE_WEAKEST 0.69f
 #define HUE_STRONGEST 0.0f
@@ -12,8 +15,133 @@
 #define GHOST_ACCEL 0.35f
 #define GHOST_LIMIT 40.0f
 
+#define SKULL_RADIUS 16.0f
+#define KEY_RADIUS 16.0f
+#define KEY_ROTATE_SPEED 2.5f
+#define BADDIE_DESPAWN 128
+#define POPUP_TIME 1.0f
+
 static void transition(Game *g, int st);
 static void state_update(Game *g, const GameInput *in);
+
+// the collision shape of body i: a box for blocks and doors, a circle for skulls;
+// layers 0 once it's gone (collision.disabled)
+static void body_shape(Game *g, int i) {
+    Body *b = &g->bodies[i];
+    Shape *s = &g->body_shapes[i];
+    s->layers = !b->alive ? 0u : b->type == OBJ_SKULL ? 8u : 1u;
+    if (b->type == OBJ_SKULL) {
+        s->kind = SHAPE_CIRCLE;
+        s->c = b->pos;
+        s->r = b->radius;
+        s->n = 0;
+        s->pts = NULL;
+    } else {
+        s->kind = SHAPE_POLY;
+        s->n = 4;
+        s->pts = g->body_pts[i];
+        float c = cosf(b->rot), sn = sinf(b->rot);
+        const float cx[4] = {-1, 1, 1, -1}, cy[4] = {-1, -1, 1, 1};
+        for (int k = 0; k < 4; k++) {
+            float x = cx[k] * b->half.x, y = cy[k] * b->half.y;
+            s->pts[k] = v2(b->pos.x + x * c - y * sn, b->pos.y + x * sn + y * c);
+        }
+    }
+    shape_update_bbox(s);
+}
+
+static void body_remove(Game *g, int i) {
+    g->bodies[i].alive = false;
+    body_shape(g, i);
+}
+
+static float randf(float lo, float hi) { return lo + (hi - lo) * (rand() / (float)RAND_MAX); }
+
+static bool same_color(const float a[3], const float b[3]) {
+    return fabsf(a[0] - b[0]) < 1e-3f && fabsf(a[1] - b[1]) < 1e-3f && fabsf(a[2] - b[2]) < 1e-3f;
+}
+
+// block.gd hit() / key_door.gd hit(), when the moving cat runs into it
+static void block_hit(Game *g, int i) {
+    Body *b = &g->bodies[i];
+    if (b->type == OBJ_KEYDOOR) {
+        int found = -1;
+        for (int h = 0; h < g->nheld && found < 0; h++)
+            if (same_color(g->keys[g->held[h]].color, b->color)) found = h;
+        if (found < 0) return;
+        g->keys[g->held[found]].alive = false; // key.gd: not in has_keys any more -> remove()
+        for (int h = found; h < g->nheld - 1; h++) g->held[h] = g->held[h + 1];
+        g->nheld--;
+        g->events |= EV_KEYDOOR;
+    } else {
+        g->events |= EV_DBLOCK;
+    }
+    body_remove(g, i);
+    if (b->dblock_score) {
+        g->dblock_multiplier++;
+        b->popup_score = b->score * g->dblock_multiplier;
+    } else {
+        b->popup_score = b->score;
+    }
+    g->level_bonus += b->popup_score;
+    b->popup = POPUP_TIME;
+}
+
+// baddie.gd death()
+static void baddie_death(Game *g, int i) {
+    Body *b = &g->bodies[i];
+    body_remove(g, i);
+    b->vel = v2(0, 0);
+    g->skull_pitch = randf(b->pitch_lo, b->pitch_hi);
+    g->events |= EV_SKULL;
+    g->thought = TH_SKULL;
+    b->popup_score = b->score;
+    g->level_bonus += b->score;
+    b->popup = POPUP_TIME;
+}
+
+// baddie.gd _physics_process: straight line, bouncing off walls and other baddies
+static void bodies_tick(Game *g) {
+    for (int i = 0; i < g->nbodies; i++) {
+        Body *b = &g->bodies[i];
+        if (b->popup > 0) b->popup -= TICK;
+        if (b->type == OBJ_KEYDOOR) { // the lock fades while a matching key is held
+            bool yay = false;
+            for (int h = 0; h < g->nheld; h++) yay |= same_color(g->keys[g->held[h]].color, b->color);
+            b->lock_a = lerpf(b->lock_a, yay ? 0.0f : 1.0f, 0.1f);
+        }
+        if (b->type != OBJ_SKULL || !b->alive) continue;
+        if (fmaxf(fabsf(b->pos.x), fabsf(b->pos.y)) > g->lv.bounds + BADDIE_DESPAWN) {
+            body_remove(g, i);
+            continue;
+        }
+        phys_set_exclude(g->lv.nshapes + i);
+        Collision c = phys_move_circle(&g->lv, &b->pos, b->radius, v2mul(b->vel, TICK), 9u);
+        phys_set_exclude(-1);
+        if (c.hit) b->vel = v2bounce(b->vel, c.normal);
+        body_shape(g, i);
+    }
+}
+
+// key.gd: held keys circle the cat
+static void keys_tick(Game *g) {
+    g->key_rotation_offset = v2(
+        g->key_rotation_offset.x * cosf(TICK * KEY_ROTATE_SPEED) - g->key_rotation_offset.y * sinf(TICK * KEY_ROTATE_SPEED),
+        g->key_rotation_offset.x * sinf(TICK * KEY_ROTATE_SPEED) + g->key_rotation_offset.y * cosf(TICK * KEY_ROTATE_SPEED));
+    for (int h = 0; h < g->nheld; h++) {
+        Key *k = &g->keys[g->held[h]];
+        float a = 2 * PI_F * h / g->nheld;
+        vec2 off = v2(g->key_rotation_offset.x * cosf(a) - g->key_rotation_offset.y * sinf(a),
+                      g->key_rotation_offset.x * sinf(a) + g->key_rotation_offset.y * cosf(a));
+        k->vel = v2add(k->vel, v2mul(v2sub(v2add(g->pos, off), k->pos), k->accel));
+        k->vel = v2mul(k->vel, 0.35f);                 // FRICTION
+        k->accel = fminf(5.0f, k->accel + 0.01f);      // ACCEL_MAX, ACCEL_RAMP
+        k->pos = v2add(k->pos, v2mul(k->vel, 0.75f));  // SPEED
+        if (k->alpha > 0.5f) k->alpha -= 0.05f;
+    }
+    for (int i = 0; i < g->nkeys; i++)
+        if (g->keys[i].popup > 0) g->keys[i].popup -= TICK;
+}
 
 void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) {
     LevelDef keep = *lv;
@@ -50,6 +178,46 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
                 g->nghosts++;
             }
             break;
+        case OBJ_DBLOCK:
+        case OBJ_KEYDOOR:
+        case OBJ_SKULL:
+            if (g->nbodies < MAX_BODIES) {
+                Body *b = &g->bodies[g->nbodies++];
+                b->type = o->type;
+                b->alive = true;
+                b->pos = o->pos;
+                b->half = v2(obj_param(o, "size_x", 32) * o->sx * 0.5f, obj_param(o, "size_y", 32) * o->sy * 0.5f);
+                b->color[0] = obj_param(o, "color_r", 1);
+                b->color[1] = obj_param(o, "color_g", 1);
+                b->color[2] = obj_param(o, "color_b", 1);
+                b->score = (int)obj_param(o, "score_value", 0);
+                b->dblock_score = obj_param(o, "dblock_score", 0) != 0;
+                b->spr = (int)obj_param(o, "spr", -1);
+                b->spr2 = (int)obj_param(o, "spr2", -1);
+                b->pitch_lo = obj_param(o, "pitch_lo", 1);
+                b->pitch_hi = obj_param(o, "pitch_hi", 1);
+                b->lock_a = 1;
+                b->rot = o->rot;
+                b->radius = SKULL_RADIUS * o->sx;
+                if (o->type == OBJ_SKULL) // baddie.gd: velocity = speed * direction.normalized()
+                    b->vel = v2mul(v2norm(v2(obj_param(o, "dir_x", 0), obj_param(o, "dir_y", 0))),
+                                   obj_param(o, "speed", 0));
+            }
+            break;
+        case OBJ_KEY:
+            if (g->nkeys < MAX_KEYS) {
+                Key *k = &g->keys[g->nkeys++];
+                k->pos = o->pos;
+                k->alive = true;
+                k->accel = -0.2f; // ACCEL_START
+                k->alpha = 1;
+                k->color[0] = obj_param(o, "color_r", 1);
+                k->color[1] = obj_param(o, "color_g", 1);
+                k->color[2] = obj_param(o, "color_b", 1);
+                k->score = (int)obj_param(o, "score_value", 0);
+                k->spr = (int)obj_param(o, "spr", -1);
+            }
+            break;
         case OBJ_COIN:
             if (g->ncoins < MAX_COINS) {
                 g->coins[g->ncoins].pos = o->pos;
@@ -62,7 +230,11 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
             break;
         }
     }
-    g->thought = TH_IDLE;
+    for (int i = 0; i < g->nbodies; i++) body_shape(g, i);
+    phys_set_dynamic(g->body_shapes, g->nbodies);
+    g->sand_claimer = -1;
+    g->key_rotation_offset = v2(48, 0);
+    g->thought = TH_NONE; // the level start's Idle thought is played by the app
     // PSpawn.enter
     g->pstate = PS_SPAWN;
     g->sprite_scale = 0.003f;
@@ -135,6 +307,7 @@ static void death(Game *g, int type) {
     if (type == DEATH_WALL) g->events |= EV_DEATH_WALL;
     else if (type == DEATH_BACKROOMS) g->events |= EV_BACKROOMS;
     else if (type == DEATH_OB) g->events |= EV_OB;
+    else if (type == DEATH_WATER) g->events |= EV_WATER_DEATH;
     else g->events |= EV_CAUGHT;
     g->thought = type == DEATH_BACKROOMS ? TH_BACKROOMS : TH_DEATH;
 }
@@ -318,16 +491,28 @@ static void player_tick(Game *g, const GameInput *in) {
 
     Collision c = phys_move_circle(&g->lv, &g->pos, PLAYER_RADIUS, v2mul(g->vel, TICK), PLAYER_MASK);
     if (c.hit) {
+        bool hit_moving_wall = false;
+        int body = c.shape - g->lv.nshapes; // >= 0: a block, door or skull
         if (g->pstate == PS_MOVING) {
-            bool in_wall = phys_point_solid(&g->lv, g->pos, 1u);
-            if (in_wall) g->wall_death_count++;
-            g->events |= EV_BUMP;
-            g->last_bump_shape = c.shape;
-            g->bump_pitch += 0.05f;
+            if (body >= 0 && g->bodies[body].type == OBJ_SKULL) {
+                hit_moving_wall = true;
+                baddie_death(g, body);
+                g->events |= EV_BUMP;
+            } else if (body >= 0) {
+                block_hit(g, body);
+                g->events |= EV_BUMP;
+            } else {
+                bool in_wall = phys_point_solid(&g->lv, g->pos, 1u);
+                if (in_wall) g->wall_death_count++;
+                g->events |= EV_BUMP;
+                g->last_bump_shape = c.shape;
+                g->bump_pitch += 0.05f;
+            }
         } else {
             g->events |= EV_PUSH;
         }
         g->vel = v2bounce(g->vel, c.normal);
+        if (hit_moving_wall) g->pos = v2add(g->pos, v2mul(g->vel, TICK));
         float av2 = v2len2(g->add_vel), vv2 = v2len2(g->vel);
         if (100 * av2 > vv2 && vv2 > 0) g->vel = v2mul(g->vel, sqrtf(100 * av2 / vv2));
     }
@@ -355,8 +540,48 @@ static void areas_tick(Game *g) {
             if (g->coins[i].mult) {
                 g->level_bonus += g->coins[i].score + g->coins[i].multval * g->coin_multiplier;
                 if (g->coin_multiplier <= 9) g->coin_multiplier++;
+                if (g->coin_multiplier >= 6) g->thought = TH_MONEY;
             } else {
                 g->level_bonus += g->coins[i].score;
+                g->thought = TH_MONEY;
+            }
+        }
+    }
+    // key.gd collect(): the key joins player.has_keys
+    for (int i = 0; i < g->nkeys; i++) {
+        Key *k = &g->keys[i];
+        if (!k->alive || k->held) continue;
+        float rr = KEY_RADIUS + PLAYER_RADIUS;
+        if (v2len2(v2sub(k->pos, g->pos)) < rr * rr && g->nheld < MAX_KEYS) {
+            k->held = true;
+            g->held[g->nheld++] = i;
+            g->events |= EV_KEY;
+            k->popup_score = k->score;
+            g->level_bonus += k->score;
+            k->popup = POPUP_TIME;
+        }
+    }
+    // sand_pit.gd and water_death.gd (Area2D zones)
+    for (int z = 0; z < g->lv.nzones && z < MAX_ZONES; z++) {
+        const Shape *s = &g->lv.zones[z];
+        bool in = phys_circle_overlaps(s, g->pos, PLAYER_RADIUS);
+        bool entered = in && !g->zone_in[z], exited = !in && g->zone_in[z];
+        g->zone_in[z] = in;
+        if (s->layers == ZONE_WATER) {
+            if (entered) { // can_swim is only for playthrough upgrades, so the water always wins
+                g->events |= EV_SPLASH;
+                death(g, DEATH_WATER);
+                return;
+            }
+        } else if (s->layers == ZONE_SAND) {
+            if (entered && g->sand_claimer == -1) {
+                g->sand_claimer = z;
+                g->thought = TH_SAND;
+            }
+            if (exited && g->sand_claimer == z) g->sand_claimer = -1;
+            if (in && (g->sand_claimer == z || g->sand_claimer == -1)) {
+                g->sand_claimer = z;
+                g->vel = v2(lerpf(g->vel.x, 0, 0.15f), lerpf(g->vel.y, 0, 0.15f));
             }
         }
     }
@@ -385,6 +610,7 @@ static void areas_tick(Game *g) {
 void game_tick(Game *g, const GameInput *in) {
     cur_in = in;
     g->events = 0;
+    g->thought = TH_NONE;
     g->progress = PROG_NONE;
 
     // level.gd _physics_process
@@ -408,7 +634,10 @@ void game_tick(Game *g, const GameInput *in) {
         if (m > g->lv.bounds + OB_RADIUS) death(g, (g->lv.flags & LF_ALWAYS_OB) ? DEATH_OB : DEATH_BACKROOMS);
     }
 
+    phys_set_dynamic(g->body_shapes, g->nbodies);
     player_tick(g, in);
+    keys_tick(g);
+    bodies_tick(g);
     ghosts_tick(g);
     areas_tick(g);
     for (int i = 0; i < g->ncoins; i++)

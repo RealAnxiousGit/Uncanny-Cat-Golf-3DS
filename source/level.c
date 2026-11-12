@@ -5,9 +5,9 @@
 
 #include "ucg.h"
 
-static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin"};
+static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "dblock", "keydoor", "key", "skull"};
 
-static void bbox(Shape *s) {
+void shape_update_bbox(Shape *s) {
     if (s->kind == SHAPE_CIRCLE) {
         s->x0 = s->c.x - s->r; s->x1 = s->c.x + s->r;
         s->y0 = s->c.y - s->r; s->y1 = s->c.y + s->r;
@@ -84,7 +84,7 @@ bool level_load(LevelDef *lv, const char *path) {
                 s->c.y = strtof(p, &p);
                 s->r = strtof(p, &p);
             }
-            bbox(s);
+            shape_update_bbox(s);
             lv->nshapes++;
         } else if (!strcmp(key, "obj")) {
             char name[24] = {0};
@@ -114,6 +114,32 @@ bool level_load(LevelDef *lv, const char *path) {
                 lv->objs = realloc(lv->objs, cap_o * sizeof(ObjDef));
             }
             lv->objs[lv->nobjs++] = o;
+        } else if (!strcmp(key, "zone")) {
+            char kind[16] = {0};
+            int n = 0;
+            if (sscanf(rest, "%15s %n", kind, &n) < 1) continue;
+            char *p = rest + n;
+            Shape z;
+            memset(&z, 0, sizeof(z));
+            z.kind = SHAPE_POLY;
+            z.layers = !strcmp(kind, "sand") ? ZONE_SAND : !strcmp(kind, "water") ? ZONE_WATER : 0;
+            z.n = (int)strtol(p, &p, 10);
+            if (!z.layers || z.n < 3) continue;
+            z.pts = malloc(z.n * sizeof(vec2));
+            for (int i = 0; i < z.n; i++) {
+                z.pts[i].x = strtof(p, &p);
+                z.pts[i].y = strtof(p, &p);
+            }
+            shape_update_bbox(&z);
+            lv->zones = realloc(lv->zones, (lv->nzones + 1) * sizeof(Shape));
+            lv->zones[lv->nzones++] = z;
+        } else if (!strcmp(key, "dspr")) {
+            int i;
+            DynSprite d;
+            if (sscanf(rest, "%d %d %d %f %f", &i, &d.w, &d.h, &d.ax, &d.ay) == 5 && i >= 0 && i < MAX_DSPR) {
+                lv->dspr[i] = d;
+                if (i + 1 > lv->ndspr) lv->ndspr = i + 1;
+            }
         } else if (!strcmp(key, "end")) {
             ok = true;
         }
@@ -129,6 +155,8 @@ bool level_load(LevelDef *lv, const char *path) {
 void level_free(LevelDef *lv) {
     for (int i = 0; i < lv->nshapes; i++) free(lv->shapes[i].pts);
     free(lv->shapes);
+    for (int i = 0; i < lv->nzones; i++) free(lv->zones[i].pts);
+    free(lv->zones);
     free(lv->objs);
     memset(lv, 0, sizeof(*lv));
 }

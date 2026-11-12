@@ -34,10 +34,12 @@ enum {
     EV_BUMP = 1 << 4, EV_PUSH = 1 << 5, EV_PICKUP = 1 << 6, EV_WIN = 1 << 7,
     EV_DEATH_WALL = 1 << 8, EV_COIN = 1 << 9, EV_CAUGHT = 1 << 10, EV_BACKROOMS = 1 << 11,
     EV_OB = 1 << 12, EV_PAUSE = 1 << 13, EV_GRAZE = 1 << 14,
+    EV_DBLOCK = 1 << 15, EV_KEYDOOR = 1 << 16, EV_KEY = 1 << 17, EV_SKULL = 1 << 18,
+    EV_SPLASH = 1 << 19, EV_WATER_DEATH = 1 << 20,
 };
 
 // Thought animations the top screen should show (thought_displayer categories)
-enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS };
+enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL };
 
 typedef struct {
     // positions are in the original's viewport pixels: the course is 0..512 on both axes
@@ -55,6 +57,35 @@ typedef struct {
 #define MAX_GHOSTS 8
 #define MAX_COINS 64
 #define MAX_DEMO_SHOTS 16
+#define MAX_BODIES 48   // blocks, key doors and skulls (they collide)
+#define MAX_KEYS 12
+#define MAX_ZONES 16
+
+// A block, key door or skull: a dynamic physics shape (index lv.nshapes + i)
+typedef struct {
+    int type;          // OBJ_DBLOCK, OBJ_KEYDOOR, OBJ_SKULL
+    bool alive;
+    vec2 pos, vel;     // skulls move
+    vec2 half;         // block half size
+    float rot, radius; // block rotation, skull radius
+    float color[3];    // key doors
+    int score, spr, spr2;
+    bool dblock_score;
+    float pitch_lo, pitch_hi;
+    float lock_a;      // the door's lock, fading while a matching key is held
+    int popup_score;
+    float popup;
+} Body;
+
+typedef struct {
+    vec2 pos, vel;
+    float accel, alpha;
+    float color[3];
+    int spr, score;
+    bool alive, held;
+    int popup_score;
+    float popup;
+} Key;
 
 typedef struct {
     float power_sensitivity;
@@ -93,6 +124,18 @@ typedef struct {
     float goal_r;
     int ncoins;
     struct { vec2 pos; float r; bool taken; int score, mult, multval; float popup; } coins[MAX_COINS];
+    int nbodies;
+    Body bodies[MAX_BODIES];
+    Shape body_shapes[MAX_BODIES];
+    vec2 body_pts[MAX_BODIES][4];
+    int nkeys;
+    Key keys[MAX_KEYS];
+    int held[MAX_KEYS], nheld; // player.has_keys, in pick-up order
+    vec2 key_rotation_offset;
+    int dblock_multiplier;
+    bool zone_in[MAX_ZONES];   // overlapping last tick (body_entered/exited)
+    int sand_claimer;          // sand_pit.gd player_claimer, -1 = none
+    float skull_pitch;         // pitch for this tick's skull death sound
 
     // level state (level.gd)
     bool active, victory, lose;

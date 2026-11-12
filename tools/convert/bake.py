@@ -64,6 +64,8 @@ class TexCache:
                     self.cache[key] = noise_texture(tex)
                 arr = self.cache[key]
                 return arr, (0, 0, arr.shape[1], arr.shape[0])
+            if t == "CanvasTexture":
+                return self.texture(tex.get("diffuse_texture"))
             if t in ("GradientTexture2D", "GradientTexture1D"):
                 key = ("grad", id(tex.section))
                 if key not in self.cache:
@@ -173,23 +175,28 @@ def material_fn(mat, unsupported):
         shades = [S.color(mat.get("shader_parameter/" + k), None)
                   for k in ("HighShade", "MidShade", "LowShade", "ExtraShade")]
         alpha = float(mat.get("shader_parameter/alpha", 1.0))
-        keys = [(255, 255, 255), (255, 0, 0), (0, 0, 0), (0, 0, 255)]
-
-        def fn(arr):
-            out = arr.copy()
-            c8 = np.floor(arr * 255.0 + 1e-3)
-            opaque = c8[..., 3] >= 255
-            for key, shade in zip(keys, shades):
-                if shade is None:
-                    shade = (0.0, 0.0, 0.0, 0.0)
-                m = opaque & (c8[..., 0] == key[0]) & (c8[..., 1] == key[1]) & (c8[..., 2] == key[2])
-                out[m] = shade
-            nz = out[..., 3] > 0
-            out[..., 3] = np.where(nz, alpha * arr[..., 3], 0)
-            return out
-        return fn
+        return colorswap_fn(shades, alpha)
     unsupported.add("shader " + name)
     return None
+
+
+def colorswap_fn(shades, alpha=1.0):
+    """colorswap.gdshader: white/red/black/blue pixels become High/Mid/Low/Extra shades."""
+    keys = [(255, 255, 255), (255, 0, 0), (0, 0, 0), (0, 0, 255)]
+
+    def fn(arr):
+        out = arr.copy()
+        c8 = np.floor(arr * 255.0 + 1e-3)
+        opaque = c8[..., 3] >= 255
+        for key, shade in zip(keys, shades):
+            if shade is None:
+                shade = (0.0, 0.0, 0.0, 0.0)
+            m = opaque & (c8[..., 0] == key[0]) & (c8[..., 1] == key[1]) & (c8[..., 2] == key[2])
+            out[m] = shade
+        nz = out[..., 3] > 0
+        out[..., 3] = np.where(nz, alpha * arr[..., 3], 0)
+        return out
+    return fn
 
 
 # --- the canvas -------------------------------------------------------------
@@ -575,3 +582,40 @@ def draw_light(cv, tc, node, xf):
         return  # subtract / mix lights: skipped for now
     mod = (col[0] * energy * col[3], col[1] * energy * col[3], col[2] * energy * col[3], 1.0)
     cv.draw_textured(xf, arr, (rx, ry, rw, rh), quad, uv, mod, False, None, add=True)
+
+def draw_ninepatch(cv, tc, node, xf, modulate, rect=None, colorfn=None):
+    """NinePatchRect. rect = (x, y, w, h) in xf's space (defaults to the node's offsets)."""
+    got = tc.texture(node.get("texture"))
+    if got is None:
+        return
+    arr, (rx, ry, rw, rh) = got
+    rr = node.get("region_rect")
+    if rr is not None:
+        x, y, w, h = [float(v) for v in rr.args]
+        if w > 0 and h > 0:
+            rx, ry, rw, rh = rx + x, ry + y, w, h
+    if rect is None:
+        l, t = float(node.get("offset_left", 0) or 0), float(node.get("offset_top", 0) or 0)
+        r, b = float(node.get("offset_right", 0) or 0), float(node.get("offset_bottom", 0) or 0)
+        rect = (l, t, r - l, b - t)
+    X, Y, W, H = rect
+    ml, mt = float(node.get("patch_margin_left", 0) or 0), float(node.get("patch_margin_top", 0) or 0)
+    mr, mb = float(node.get("patch_margin_right", 0) or 0), float(node.get("patch_margin_bottom", 0) or 0)
+    tile_h = int(node.get("axis_stretch_horizontal", 0) or 0) != 0
+    tile_v = int(node.get("axis_stretch_vertical", 0) or 0) != 0
+    xs_d = [X, X + ml, X + W - mr, X + W]
+    ys_d = [Y, Y + mt, Y + H - mb, Y + H]
+    xs_s = [rx, rx + ml, rx + rw - mr, rx + rw]
+    ys_s = [ry, ry + mt, ry + rh - mb, ry + rh]
+    fn = colorfn if colorfn is not None else material_fn(effective_material(node), tc.unsupported)
+    for j in range(3):
+        for i in range(3):
+            dx0, dx1, dy0, dy1 = xs_d[i], xs_d[i + 1], ys_d[j], ys_d[j + 1]
+            sx0, sx1, sy0, sy1 = xs_s[i], xs_s[i + 1], ys_s[j], ys_s[j + 1]
+            if dx1 <= dx0 or dy1 <= dy0 or sx1 <= sx0 or sy1 <= sy0:
+                continue
+            kx = 1.0 if (i == 1 and tile_h) else (sx1 - sx0) / (dx1 - dx0)
+            ky = 1.0 if (j == 1 and tile_v) else (sy1 - sy0) / (dy1 - dy0)
+            quad = [(dx0, dy0), (dx1, dy0), (dx1, dy1), (dx0, dy1)]
+            uv = (kx, 0.0, sx0 - kx * dx0, 0.0, ky, sy0 - ky * dy0)
+            cv.draw_textured(xf, arr, (sx0, sy0, sx1 - sx0, sy1 - sy0), quad, uv, modulate, True, fn)

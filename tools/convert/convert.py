@@ -24,6 +24,7 @@ from PIL import Image  # noqa: E402
 
 import bake as B  # noqa: E402
 import godot  # noqa: E402
+import hud as HUD  # noqa: E402
 import levels as L  # noqa: E402
 import scene as S  # noqa: E402
 
@@ -92,6 +93,11 @@ def convert_levels(project, tc, out, worlds, report):
                     tex3ds([png], os.path.join(out_dir, name + suffix + ".t3x"), fmt)
                     if not KEEP_PNG:
                         os.remove(png)
+            if info["dyn"]:
+                tex3ds(info["dyn"], os.path.join(out_dir, name + "_d.t3x"), "rgba8", atlas=True)
+                if not KEEP_PNG:
+                    for fp in info["dyn"]:
+                        os.remove(fp)
             names.append(name)
             log("  level %-6s %-5s bounds %4d  shapes %4d  objects %2d  %.1fs" % (
                 info["id"], name, info["bounds"], info["shapes"], info["objects"], time.time() - t))
@@ -207,6 +213,68 @@ def convert_sprites(project, tc, out, report):
     log("  sprites: %d" % len(entries))
 
 
+# --- top-screen sidebar -----------------------------------------------------
+
+def convert_hud(project, out):
+    gfx = os.path.join(out, "romfs", "gfx")
+    tmp = os.path.join(out, "tmp_hud")
+    os.makedirs(gfx, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
+    bg = os.path.join(tmp, "top_bg.png")
+    HUD.top_background(project).save(bg)
+    tex3ds([bg], os.path.join(gfx, "top_bg.t3x"), "rgb565")
+    files, lines = [], []
+    for i, (name, img, anchor) in enumerate(HUD.hud_entries(project)):
+        p = os.path.join(tmp, "%02d_%s.png" % (i, name))
+        img.save(p)
+        files.append(p)
+        lines.append("%s %d %d %d %s %s 1 1" % (name, i, img.size[0], img.size[1],
+                                               L._fmt(anchor[0]), L._fmt(anchor[1])))
+    tex3ds(files, os.path.join(gfx, "hud.t3x"), "rgba8", atlas=True)
+    with open(os.path.join(gfx, "hud.txt"), "w", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    if not KEEP_PNG:
+        shutil.rmtree(tmp)
+    log("  hud: %d pieces" % len(lines))
+
+
+MKBCFNT = os.path.join(os.environ.get("DEVKITPRO", "/opt/devkitpro"), "tools", "bin", "mkbcfnt")
+
+
+def convert_menu(project, out):
+    gfx = os.path.join(out, "romfs", "gfx")
+    tmp = os.path.join(out, "tmp_menu")
+    os.makedirs(gfx, exist_ok=True)
+    os.makedirs(tmp, exist_ok=True)
+    bg = os.path.join(tmp, "settings_bg.png")
+    HUD.settings_background(project).save(bg)
+    tex3ds([bg], os.path.join(gfx, "settings_bg.t3x"), "rgb565")
+    # jumpscare: the ghost costume's picture at full size, drawn across both screens
+    r = project.load("res://assetsNEW/scenes/utils/costumes/uncanny.tres")
+    g = S.resolve(project, r, r.resource.props.get("graphic"))
+    js = os.path.join(tmp, "jumpscare.png")
+    Image.open(project.fs(g.path)).convert("RGB").resize((512, 512), Image.LANCZOS).save(js)
+    tex3ds([js], os.path.join(gfx, "jumpscare.t3x"), "rgb565")
+    files, lines = [], []
+    for i, (name, img, anchor) in enumerate(HUD.menu_entries(project)):
+        p = os.path.join(tmp, "%02d_%s.png" % (i, name))
+        img.save(p)
+        files.append(p)
+        lines.append("%s %d %d %d %s %s 1 1" % (name, i, img.size[0], img.size[1],
+                                               L._fmt(anchor[0]), L._fmt(anchor[1])))
+    tex3ds(files, os.path.join(gfx, "menu.t3x"), "rgba8", atlas=True)
+    with open(os.path.join(gfx, "menu.txt"), "w", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    for name, res, size in HUD.FONTS:
+        r = subprocess.run([MKBCFNT, "-s", str(size), "-o", os.path.join(gfx, name + ".bcfnt"), project.fs(res)],
+                           capture_output=True, text=True)
+        if r.returncode:
+            raise SystemExit("mkbcfnt failed for %s:\n%s%s" % (res, r.stdout, r.stderr))
+    if not KEEP_PNG:
+        shutil.rmtree(tmp)
+    log("  menu: %d pieces, %d fonts" % (len(lines), len(HUD.FONTS)))
+
+
 # --- audio ------------------------------------------------------------------
 
 def import_loop(project, res_path):
@@ -308,9 +376,15 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--worlds", default="0,1,2,3,4,5,6")
     ap.add_argument("--no-audio", action="store_true")
+    ap.add_argument("--no-thoughts", action="store_true", help="skip the thoughts clips (slowest step)")
     ap.add_argument("--keep-png", action="store_true", help="keep baked PNGs next to the .t3x files")
+    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,hud,menu,thoughts,text,demos,audio")
     a = ap.parse_args()
     KEEP_PNG = a.keep_png
+    only = {s.strip() for s in a.only.split(",") if s.strip()}
+
+    def want(step):
+        return not only or step in only
     t0 = time.time()
     project = godot.Project(a.source)
     ver = project.settings.get("application/config/version")
@@ -319,20 +393,34 @@ def main():
     tc = B.TexCache(project)
     report = []
     log("Uncanny Cat Golf %s -> %s" % (ver, a.out))
-    log("levels:")
-    convert_levels(project, tc, a.out, [w.strip() for w in a.worlds.split(",") if w.strip()], report)
-    log("sprites:")
-    convert_sprites(project, tc, a.out, report)
-    log("text:")
-    convert_text(project, a.out)
-    log("demos:")
-    convert_demos(project, a.out)
-    if not a.no_audio:
+    if want("levels"):
+        log("levels:")
+        convert_levels(project, tc, a.out, [w.strip() for w in a.worlds.split(",") if w.strip()], report)
+    if want("sprites"):
+        log("sprites:")
+        convert_sprites(project, tc, a.out, report)
+    if want("hud"):
+        log("hud:")
+        convert_hud(project, a.out)
+    if want("menu"):
+        log("menu:")
+        convert_menu(project, a.out)
+    if want("thoughts") and not a.no_thoughts:
+        log("thoughts:")
+        HUD.convert_thoughts(project, a.out, log, report)
+    if want("text"):
+        log("text:")
+        convert_text(project, a.out)
+    if want("demos"):
+        log("demos:")
+        convert_demos(project, a.out)
+    if want("audio") and not a.no_audio:
         log("audio:")
         convert_audio(project, a.out)
     if tc.unsupported:
         report.append("not drawn yet: " + ", ".join(sorted(tc.unsupported)))
-    with open(os.path.join(a.out, "convert-report.txt"), "w", newline="\n") as f:
+    report_name = "convert-report.txt" if not only else "convert-report-partial.txt"
+    with open(os.path.join(a.out, report_name), "w", newline="\n") as f:
         f.write("\n".join(report) + "\n")
     log("done in %.0fs, %d report lines (convert-report.txt)" % (time.time() - t0, len(report)))
 
