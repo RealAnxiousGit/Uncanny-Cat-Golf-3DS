@@ -47,7 +47,8 @@ enum {
     OBJ_TOKEN, OBJ_JUMPPAD, OBJ_SPAWNER, OBJ_CAR, OBJ_POLICE, OBJ_SLOT, OBJ_SLOTMACHINE,
     OBJ_SWITCH, OBJ_DOG, OBJ_DOGGOAL, OBJ_RING, OBJ_SCOIN, OBJ_TILES, OBJ_LIGHTS, OBJ_ASHBABY,
     OBJ_PORTAL, OBJ_NUKE, OBJ_FAKEGOAL, OBJ_FGHOST, OBJ_PRISMGATE,
-    OBJ_HORSE, OBJ_HGOAL, OBJ_MINE, OBJ_BOSSAPPEAR, OBJ_METRONOME, OBJ_COUNT
+    OBJ_HORSE, OBJ_HGOAL, OBJ_MINE, OBJ_BOSSAPPEAR, OBJ_METRONOME,
+    OBJ_COASTER, OBJ_WIZARD, OBJ_COUNT
 };
 
 #define MAX_PARAMS 24
@@ -62,7 +63,8 @@ typedef struct {
 } ObjDef;
 
 // Area zones (outline only; their art is in the floor picture)
-enum { ZONE_SAND = 1, ZONE_WATER = 2, ZONE_POLICE = 3, ZONE_LIGHTS = 4, ZONE_ASHBABY = 5, ZONE_BOSSAPPEAR = 6 };
+enum { ZONE_SAND = 1, ZONE_WATER = 2, ZONE_POLICE = 3, ZONE_LIGHTS = 4, ZONE_ASHBABY = 5, ZONE_BOSSAPPEAR = 6,
+       ZONE_COASTER = 7 };
 
 // Pictures of dynamic objects in <id>_d.t3x
 typedef struct { int w, h; float ax, ay; } DynSprite;
@@ -71,6 +73,9 @@ typedef struct { int w, h; float ax, ay; } DynSprite;
 enum {
     LF_ALWAYS_OB = 1, LF_NEVER_OB = 2, LF_MIRROR = 4, LF_HIDE_SCORING = 8, LF_UNSKIPPABLE = 16,
     LF_FINAL_GHOST = 32, // level.gd final_ghost_level: the Thinker is hidden
+    LF_GOLDEN_TEE = 64,  // 5-18 golden_tee.gd: results_no_progress + golden tee drop
+    LF_SANTA_SCROLL = 128, // P-15 santa.gd: upward vertical camera scroll + left/bottom OB
+    LF_METRONOME = 256,  // level.gd metronome_level
 };
 
 // an animation that moves the game (levels.py level_tracks): wind on the cat, a goal on a path

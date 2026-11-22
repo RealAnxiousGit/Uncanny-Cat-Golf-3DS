@@ -31,11 +31,13 @@ static float vol_master = 1, vol_music = 1, vol_sound = 1;
 
 // music
 typedef struct { int id; char file[64]; bool loop; float loop_offset, bpm; } Track;
-static Track tracks[32];
+static Track tracks[128];
+static Track custom_track;
 static int ntracks;
 static OggVorbis_File mvf;
-static bool music_open;
+static bool music_open, music_paused;
 static int music_channels, music_rate;
+static float music_pitch = 1.0f;
 static const Track *cur_track;
 static volatile uint64_t music_played; // samples of the current track played through
 static ndspWaveBuf mbuf[MUSIC_BUFS];
@@ -58,7 +60,7 @@ static void load_track_index(void) {
     FILE *f = fopen(dp("music/index.txt"), "r");
     if (!f) return;
     char line[160];
-    while (fgets(line, sizeof(line), f) && ntracks < 32) {
+    while (fgets(line, sizeof(line), f) && ntracks < 128) {
         Track t;
         int loop = 0;
         t.bpm = 0;
@@ -222,7 +224,13 @@ static Sfx *find_or_load(const char *rel) {
     vorbis_info *vi = ov_info(&vf, -1);
     ogg_int64_t total = ov_pcm_total(&vf, -1);
     int ch = vi->channels > 1 ? 2 : 1;
-    int16_t *pcm = linearAlloc((size_t)total * ch * sizeof(int16_t) + 8192);
+    size_t need = (size_t)total * ch * sizeof(int16_t) + 8192;
+    if (linearSpaceFree() < need + 2 * 1024 * 1024) {
+        ov_clear(&vf);
+        PROF_END();
+        return NULL;
+    }
+    int16_t *pcm = linearAlloc(need);
     if (!pcm) {
         ov_clear(&vf);
         PROF_END();
@@ -334,36 +342,21 @@ static void music_fill(ndspWaveBuf *wb, int16_t *data) {
     ndspChnWaveBufAdd(0, wb);
 }
 
-void music_play(int id) {
-    if (!ok) return;
-    LightLock_Lock(&mlock);
-    const Track *t = NULL;
-    for (int i = 0; i < ntracks; i++)
-        if (tracks[i].id == id) t = &tracks[i];
-    if (t && t == cur_track && music_open) {
-        LightLock_Unlock(&mlock);
-        return;
-    }
+static void music_open_track_locked(const Track *t) {
     ndspChnWaveBufClear(0);
     if (music_open) {
         ov_clear(&mvf);
         music_open = false;
     }
     cur_track = NULL;
-    if (!t) {
-        LightLock_Unlock(&mlock);
-        return;
-    }
+    music_paused = false;
+    if (!t) return;
     char path[160];
     snprintf(path, sizeof(path), "%s/music/%s", data_root(), t->file);
     FILE *f = fopen(path, "rb");
-    if (!f) {
-        LightLock_Unlock(&mlock);
-        return;
-    }
+    if (!f) return;
     if (ov_open(f, &mvf, NULL, 0) < 0) {
         fclose(f);
-        LightLock_Unlock(&mlock);
         return;
     }
     vorbis_info *vi = ov_info(&mvf, -1);
@@ -374,18 +367,79 @@ void music_play(int id) {
     ndspChnReset(0);
     music_played = 0;
     ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
-    ndspChnSetRate(0, music_rate);
+    ndspChnSetRate(0, music_rate * music_pitch);
     ndspChnSetFormat(0, music_channels == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
+    ndspChnSetPaused(0, false);
     audio_set_volumes(vol_master, vol_music, vol_sound);
-    // the music thread fills the buffers; without one, the first fill happens here
     for (int i = 0; i < MUSIC_BUFS; i++) {
         memset(&mbuf[i], 0, sizeof(mbuf[i]));
         mbuf[i].status = NDSP_WBUF_DONE;
     }
     if (!mthread)
         for (int i = 0; i < MUSIC_BUFS; i++) music_fill(&mbuf[i], mdata[i]);
+}
+
+void music_play(int id) {
+    if (!ok) return;
+    LightLock_Lock(&mlock);
+    const Track *t = NULL;
+    for (int i = 0; i < ntracks; i++)
+        if (tracks[i].id == id) t = &tracks[i];
+    if (t && t == cur_track && music_open) {
+        LightLock_Unlock(&mlock);
+        return;
+    }
+    music_open_track_locked(t);
     LightLock_Unlock(&mlock);
     if (mthread) LightEvent_Signal(&mev);
+}
+
+void music_play_file(const char *rel, bool loop, float loop_offset) {
+    if (!ok) return;
+    LightLock_Lock(&mlock);
+    if (!rel || !rel[0]) {
+        music_open_track_locked(NULL);
+        LightLock_Unlock(&mlock);
+        return;
+    }
+    if (music_open && cur_track == &custom_track && !strcmp(custom_track.file, rel)) {
+        LightLock_Unlock(&mlock);
+        return;
+    }
+    memset(&custom_track, 0, sizeof(custom_track));
+    custom_track.id = -99;
+    snprintf(custom_track.file, sizeof(custom_track.file), "%s", rel);
+    custom_track.loop = loop;
+    custom_track.loop_offset = loop_offset;
+    music_open_track_locked(&custom_track);
+    LightLock_Unlock(&mlock);
+    if (mthread) LightEvent_Signal(&mev);
+}
+
+void music_set_pitch(float pitch) {
+    if (pitch < 0.25f) pitch = 0.25f;
+    if (pitch > 4.0f) pitch = 4.0f;
+    music_pitch = pitch;
+    if (!ok) return;
+    LightLock_Lock(&mlock);
+    if (music_open && music_rate > 0) ndspChnSetRate(0, music_rate * music_pitch);
+    LightLock_Unlock(&mlock);
+}
+
+void music_set_paused(bool paused) {
+    if (!ok) return;
+    LightLock_Lock(&mlock);
+    music_paused = paused;
+    if (music_open) ndspChnSetPaused(0, paused);
+    LightLock_Unlock(&mlock);
+}
+
+bool music_is_playing(void) {
+    if (!ok || !music_open) return false;
+    if (cur_track && cur_track->loop) return !music_paused;
+    for (int i = 0; i < MUSIC_BUFS; i++)
+        if (mbuf[i].status == NDSP_WBUF_QUEUED || mbuf[i].status == NDSP_WBUF_PLAYING) return !music_paused;
+    return false;
 }
 
 // the beat the music is on (metronome.gd _get_current_beat), or -1 with no music or no BPM

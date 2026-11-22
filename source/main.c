@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "prof.h"
 #include "worker.h"
@@ -15,22 +16,28 @@
 #include "save.h"
 #include "thoughts.h"
 #include "bort.h"
+#include "pthru.h"
+#include "endless.h"
+#include "villa.h"
 
 #define COURSE_X 40.0f
 #define COURSE_W 240.0f
 #define BOT_W 320
 #define TOP_W 400
 #define SCR_H 240
-#define NWORLDS 8
+#define NWORLDS 9
 #define MG_WORLD (NWORLDS - 1) // the level select's last page lists the minigames
 enum { MG_BORT, NMINIGAMES };
 
 // ---------------------------------------------------------------- sprites
 typedef struct { char name[32]; C2D_SpriteSheet *sheet; int idx; float ax, ay, ux, uy; } SpriteInfo;
-#define MAX_SPR 320
+#define MAX_SPR 512
 static SpriteInfo sprinfo[MAX_SPR];
 static int nspr;
 static C2D_SpriteSheet sprites, hudsheet, top_bg, menusheet, settings_bg, jumpscare_sheet, creditsheet;
+static C2D_SpriteSheet title_sheet, costume_sheet, extras_sheet;
+static EndlessRun endless;
+static bool in_endless;
 
 static int spr_find(const char *name) {
     for (int i = 0; i < nspr; i++)
@@ -246,46 +253,18 @@ static void save_settings(void) {
 
 static int level_rank(int w, int i);
 
-// pthru total_prisms: each level's best rank (P = 5 prisms), added up
-static int total_prisms(void) {
-    int n = 0;
-    for (int w = 0; w < NWORLDS; w++)
-        for (int i = 0; i < wcount[w]; i++) {
-            int r = level_rank(w, i);
-            if (r > 0) n += r;
-        }
-    return n;
-}
-
 static int cur_world; // the level being played (declared again with the app state below)
 
-static GameSettings game_settings(void) {
-    GameSettings g = {set.sens10 / 10.0f, set.invert, set.buffer, total_prisms(), cur_world == 6};
-    return g;
-}
-
-// best results per level, until playthroughs (the original's pthru files) arrive
-static void record_result(const char *id, int score, float time, int rank, int strokes) {
-    char k[40];
-    snprintf(k, sizeof(k), "%s_score", id);
-    bool better = score > cfg_get_int(savedata, "LEVELS", k, -1);
-    if (better) {
-        cfg_set_int(savedata, "LEVELS", k, score);
-        snprintf(k, sizeof(k), "%s_rank", id);
-        cfg_set_int(savedata, "LEVELS", k, rank);
-        snprintf(k, sizeof(k), "%s_strokes", id);
-        cfg_set_int(savedata, "LEVELS", k, strokes);
-    }
-    snprintf(k, sizeof(k), "%s_time", id);
-    float bt = cfg_get_float(savedata, "LEVELS", k, 1e9f);
-    if (time < bt) cfg_set_float(savedata, "LEVELS", k, time);
-    PROF_BEGIN("save write");
-    cfg_write_later(savedata);
-    PROF_END();
-}
+static GameSettings game_settings(void);
+static void record_result(const char *id, int score, float time, int rank, int strokes);
 
 // ---------------------------------------------------------------- app state
-enum { ST_SELECT, ST_PLAY, ST_PAUSE, ST_SETTINGS, ST_INTRO, ST_BORT };
+enum {
+    ST_SELECT, ST_PLAY, ST_PAUSE, ST_SETTINGS, ST_INTRO, ST_BORT,
+    ST_TITLE, ST_ATTRACT, ST_MAIN_MENU, ST_PTHRU_SELECT, ST_PTHRU_MAKE,
+    ST_ENDLESS_OVER, ST_WORLD_RESULTS, ST_ENDING, ST_FINAL_RESULTS,
+    ST_VILLA, ST_COSTUMES, ST_SOUND_TEST, ST_PHONE, ST_CREDITS
+};
 
 static C3D_RenderTarget *top, *bot;
 static C2D_TextBuf tbuf;
@@ -294,6 +273,37 @@ static int cur_world, cur_level, sel_world, sel_cursor, sel_scroll;
 static Game game;
 static LevelDef level;
 static bool level_loaded;
+static int main_cursor = 0, pthru_cursor = 0, make_cursor = 0;
+static uint32_t make_mods = 0;
+static bool make_peak = false;
+static int villa_cursor = 0, cost_cursor = 0, cost_scroll = 0;
+static int st_cursor = 0, st_scroll = 0, st_playing = -1;
+static bool st_paused = false, st_pause_mix = false;
+static float st_cd_rot = 0;
+static PhoneState phone;
+static int title_idle = 0, title_splash_idx = 0, cutscene_world = 0, cutscene_t = 0;
+static int credits_room = 0, attract_idx = 0;
+static vec2 credits_pos = {160, 120};
+static const char *player_spr(void);
+static const char *ghost_spr(void);
+static void play_jumpscare_sfx(void);
+
+static GameSettings game_settings(void) {
+    PthruSave *p = pthru_cur();
+    GameSettings g = {
+        set.sens10 / 10.0f, set.invert, set.buffer,
+        p->total_prisms,
+        cur_world == 6 || p->can_swim,
+        in_endless ? endless.mods : p->mods
+    };
+    return g;
+}
+
+static void record_result(const char *id, int score, float time, int rank, int strokes) {
+    (void)id;
+    pthru_record_level(cur_world, cur_level, score, time, rank, strokes,
+                       (level.flags & LF_HIDE_SCORING) != 0, wcount);
+}
 static C2D_SpriteSheet floor_u, floor_o, dyn_sheet;
 static C2D_SpriteSheet floor_u2, floor_o2, ashbaby_sheet; // lights-out pictures, 3-10's Ash Baby
 static int ashbaby_a; // ash_baby_event.gd: jumpscare.modulate.a8, 254 falling by 2 a frame
@@ -331,7 +341,7 @@ static void camera_follow(vec2 target, bool snap) {
 static vec2 world_to_screen(vec2 w) {
     float k = course_scale();
     float x = (w.x + level.bounds) * k;
-    if (level.flags & LF_MIRROR) x = 2 * level.bounds * k - x;
+    if (game.mirror_active) x = 2 * level.bounds * k - x;
     return v2(course_left() + x, course_top() + (w.y + level.bounds) * k);
 }
 
@@ -385,24 +395,29 @@ static bool start_level(int w, int l) {
     return ok;
 }
 
-static bool start_level_(int w, int l) {
+static void level_rel(char *out, size_t n, int w, int l, const char *suf) {
+    if (w == 7) snprintf(out, n, "%s/levels/we/%s%s", data_root(), wnames[w][l], suf);
+    else snprintf(out, n, "%s/levels/w%d/%s%s", data_root(), w, wnames[w][l], suf);
+}
+
+static bool start_level_mode(int w, int l, int mode) {
     unload_level();
     char path[128];
-    snprintf(path, sizeof(path), "%s/levels/w%d/%s.txt", data_root(), w, wnames[w][l]);
+    level_rel(path, sizeof(path), w, l, ".txt");
     PROF_BEGIN("level text");
     bool read = level_load(&level, path);
     PROF_END();
     if (!read) return false;
     level_loaded = true;
     PROF_BEGIN("floor pictures");
-    snprintf(path, sizeof(path), "%s/levels/w%d/%s_u.t3x", data_root(), w, wnames[w][l]);
+    level_rel(path, sizeof(path), w, l, "_u.t3x");
     floor_u = sheet_load(path);
     if (level.has_over) {
-        snprintf(path, sizeof(path), "%s/levels/w%d/%s_o.t3x", data_root(), w, wnames[w][l]);
+        level_rel(path, sizeof(path), w, l, "_o.t3x");
         floor_o = sheet_load(path);
     }
-    if (level.ndspr > 0) { // pictures of the blocks, doors, keys and skulls
-        snprintf(path, sizeof(path), "%s/levels/w%d/%s_d.t3x", data_root(), w, wnames[w][l]);
+    if (level.ndspr > 0) {
+        level_rel(path, sizeof(path), w, l, "_d.t3x");
         dyn_sheet = sheet_load(path);
     }
     for (int i = 0; i < level.nobjs; i++) {
@@ -410,10 +425,10 @@ static bool start_level_(int w, int l) {
         bool alt = level.objs[i].type == OBJ_LIGHTS ||
                    (level.objs[i].type == OBJ_FAKEGOAL && obj_param(&level.objs[i], "alt", 0) != 0);
         if (alt && !floor_u2) {
-            snprintf(path, sizeof(path), "%s/levels/w%d/%s_u2.t3x", data_root(), w, wnames[w][l]);
+            level_rel(path, sizeof(path), w, l, "_u2.t3x");
             floor_u2 = sheet_load(path);
             if (level.has_over) {
-                snprintf(path, sizeof(path), "%s/levels/w%d/%s_o2.t3x", data_root(), w, wnames[w][l]);
+                level_rel(path, sizeof(path), w, l, "_o2.t3x");
                 floor_o2 = sheet_load(path);
             }
         }
@@ -423,8 +438,9 @@ static bool start_level_(int w, int l) {
         const ObjDef *o = &level.objs[i];
         if (o->type != OBJ_TILES) continue;
         if (obj_param(o, "tex", 0) != 0) {
-            snprintf(path, sizeof(path), "%s/levels/w%d/%s_t%d.t3x", data_root(), w, wnames[w][l],
-                     (int)obj_param(o, "group", 0));
+            char tsuf[24];
+            snprintf(tsuf, sizeof(tsuf), "_t%d.t3x", (int)obj_param(o, "group", 0));
+            level_rel(path, sizeof(path), w, l, tsuf);
             tile_sheet[t] = sheet_load(path);
             tile_ax[t] = obj_param(o, "ax", 0);
             tile_ay[t] = obj_param(o, "ay", 0);
@@ -432,38 +448,67 @@ static bool start_level_(int w, int l) {
         }
         t++;
     }
-    prefetch_drop(); // a picture this level turned out not to have
+    prefetch_drop();
     PROF_END();
     cur_world = w;
     cur_level = l;
-    game.ndemo = 0;
+    if (mode != MODE_DEMO) game.ndemo = 0;
     gset = game_settings();
-    game_start(&game, &level, MODE_NORMAL, &gset);
+    game_start(&game, &level, mode, &gset);
     camera_follow(game.pos, true);
     jumpscare_t = results_t = win_t = 0;
     btn_alpha[0] = btn_alpha[1] = btn_alpha[2] = 1;
     results_stage = 0;
     results_rank_shown = -1;
     dragging = false;
-    music_play(level.music);
-    // level.gd _ready(): Idle, falling back to Idle
+    music_set_pitch(1.0f);
+    if (in_endless) {
+        music_play(endless.demon_active ? (endless.demon_radical ? 13 : 12) : 11);
+    } else {
+        music_play(level.music);
+    }
     thoughts_play("Idle");
     thoughts_fallback("Idle");
-    state = ST_PLAY;
+    state = (mode == MODE_DEMO) ? ST_ATTRACT : ST_PLAY;
     return true;
 }
 
+static bool start_level_(int w, int l) { return start_level_mode(w, l, in_endless ? MODE_ENDLESS : MODE_NORMAL); }
+
 static bool level_after(int *w, int *l);
 static void next_level(void) {
-    int w = cur_world, l = cur_level;
-    if (level_after(&w, &l)) start_level(w, l);
-    else to_select();
+    if (cur_level + 1 < wcount[cur_world]) {
+        start_level(cur_world, cur_level + 1);
+        return;
+    }
+    pthru_on_world_clear(cur_world);
+    unload_level();
+    cutscene_world = cur_world;
+    cutscene_t = 0;
+    if (cur_world == 6) {
+        state = ST_FINAL_RESULTS;
+        music_play_file("musVictory.ogg", true, 0);
+    } else if (cur_world == 5) {
+        state = ST_ENDING;
+        music_play_file("musGoodEnd.ogg", false, 0);
+    } else {
+        state = ST_WORLD_RESULTS;
+        char mf[32];
+        snprintf(mf, sizeof(mf), "musClear%d.ogg", cur_world);
+        music_play_file(mf, false, 0);
+    }
 }
 
 // ---------------------------------------------------------------- transitions
 // Screen changes fade through black (the original cuts straight across). The change itself happens
 // on the first frame after the screen is fully black, so a level load's pause is never seen.
-enum { TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS, TR_INTRO_DONE, TR_MINIGAME };
+enum {
+    TR_START, TR_NEXT, TR_SELECT, TR_SETTINGS, TR_CLOSE_SETTINGS, TR_INTRO_DONE, TR_MINIGAME,
+    TR_TITLE, TR_ATTRACT, TR_MAIN_MENU, TR_PTHRU_SELECT, TR_PTHRU_MAKE,
+    TR_ENDLESS_START, TR_ENDLESS_NEXT, TR_ENDLESS_SKIP, TR_ENDLESS_RESET, TR_ENDLESS_OVER,
+    TR_WORLD_RESULTS, TR_ENDING, TR_FINAL_RESULTS,
+    TR_VILLA, TR_COSTUMES, TR_SOUND_TEST, TR_PHONE, TR_CREDITS
+};
 #define TR_OUT (1.0f / 60 / 0.12f) // 0.12 s to black
 #define TR_IN (1.0f / 60 / 0.16f)  // 0.16 s back
 static int tr_phase = 2, tr_act, tr_a, tr_b; // phase 0 idle, 1 going dark, 2 coming back
@@ -475,18 +520,16 @@ static float tr_out = TR_OUT, tr_in = TR_IN; // the intro fades slower
 // the level after (w, l), or false at the end of the game
 static bool level_after(int *w, int *l) {
     if (*l + 1 < wcount[*w]) return ++*l, true;
-    if (*w + 1 < MG_WORLD && wcount[*w + 1] > 0) return ++*w, *l = 0, true;
+    if (*w + 1 < 7 && wcount[*w + 1] > 0) return ++*w, *l = 0, true;
     return false;
 }
 
 // start reading a level's pictures, so the load during the fade's black frame only copies them
 static void prefetch_level(int w, int l) {
-    static const char *const SUF[3] = {"u", "o", "d"};
+    static const char *const SUF[3] = {"_u.t3x", "_o.t3x", "_d.t3x"};
     char path[160];
     for (int i = 0; i < 3; i++) {
-        // a picture the level does not have just fails on the worker (opening files here would cost
-        // the frame: on the SD card each open takes a while)
-        snprintf(path, sizeof(path), "%s/levels/w%d/%s_%s.t3x", data_root(), w, wnames[w][l], SUF[i]);
+        level_rel(path, sizeof(path), w, l, SUF[i]);
         prefetch(path);
     }
 }
@@ -506,16 +549,72 @@ static void open_settings(int back);
 static void close_settings_now(void);
 static void start_minigame(int which);
 
+static void start_attract_demo(void) {
+    FILE *f = fopen(dp("demos/index.txt"), "r");
+    if (!f) { state = ST_TITLE; return; }
+    char line[4096];
+    int n = 0, pick = attract_idx++;
+    while (fgets(line, sizeof(line), f)) n++;
+    if (n <= 0) { fclose(f); state = ST_TITLE; return; }
+    pick %= n;
+    rewind(f);
+    for (int i = 0; i <= pick; i++)
+        if (!fgets(line, sizeof(line), f)) break;
+    fclose(f);
+    char name[64];
+    int w = 0, l = 0, dt = 0, ns = 0, off = 0;
+    if (sscanf(line, "%63s %d %d %d %d %n", name, &w, &l, &dt, &ns, &off) < 5) { state = ST_TITLE; return; }
+    game.ndemo = ns < MAX_DEMO_SHOTS ? ns : MAX_DEMO_SHOTS;
+    char *p = line + off;
+    for (int i = 0; i < game.ndemo; i++) {
+        int u = 0;
+        sscanf(p, "%d %f %f %f%n", &game.demo[i].wait_time, &game.demo[i].power, &game.demo[i].dir.x, &game.demo[i].dir.y, &u);
+        p += u;
+    }
+    in_endless = false;
+    start_level_mode(w, l, MODE_DEMO);
+    music_play(1);
+}
+
+static void start_endless_run(void) {
+    in_endless = true;
+    endless_start(&endless, wcount, (uint32_t)osGetTime());
+    EndlessLevelRef cur = endless_current(&endless);
+    start_level(cur.world, cur.level);
+}
+
 static void transition_step(void) {
     if (tr_phase == 1 && tr_k >= 1) {
         switch (tr_act) {
-        case TR_START: start_level(tr_a, tr_b); break;
+        case TR_START: in_endless = false; start_level(tr_a, tr_b); break;
         case TR_NEXT: next_level(); break;
-        case TR_SELECT: to_select(); break;
+        case TR_SELECT: in_endless = false; to_select(); break;
         case TR_SETTINGS: open_settings(tr_a); break;
         case TR_CLOSE_SETTINGS: close_settings_now(); break;
-        case TR_INTRO_DONE: boot_finish(); state = ST_SELECT; break;
+        case TR_INTRO_DONE: boot_finish(); state = ST_TITLE; title_idle = 0; title_splash_idx = rand() % 5; music_play(0); break;
         case TR_MINIGAME: start_minigame(tr_a); break;
+        case TR_TITLE: unload_level(); in_endless = false; state = ST_TITLE; title_idle = 0; music_play(0); break;
+        case TR_ATTRACT: start_attract_demo(); break;
+        case TR_MAIN_MENU: unload_level(); in_endless = false; state = ST_MAIN_MENU; music_play(1); break;
+        case TR_PTHRU_SELECT: state = ST_PTHRU_SELECT; music_play(1); break;
+        case TR_PTHRU_MAKE: make_mods = 0; make_peak = false; make_cursor = 0; state = ST_PTHRU_MAKE; break;
+        case TR_ENDLESS_START: start_endless_run(); break;
+        case TR_ENDLESS_NEXT: {
+            EndlessLevelRef nx = endless_current(&endless);
+            start_level(nx.world, nx.level);
+        } break;
+        case TR_ENDLESS_OVER:
+            unload_level();
+            in_endless = false;
+            pthru_on_endless_progress(endless.cleared, endless.total_score, "PLAYER");
+            state = ST_ENDLESS_OVER;
+            music_play_file("musEndlessLose.ogg", true, 0);
+            break;
+        case TR_VILLA: state = ST_VILLA; music_play_file("musGallery.ogg", true, 0); break;
+        case TR_COSTUMES: state = ST_COSTUMES; music_play_file("costume/musCostumeKeys.ogg", true, 0); break;
+        case TR_SOUND_TEST: state = ST_SOUND_TEST; music_play(-2); st_paused = false; st_playing = -1; break;
+        case TR_PHONE: phone_reset(&phone); state = ST_PHONE; music_play_file("musPhone.ogg", true, 0); break;
+        case TR_CREDITS: credits_room = 0; credits_pos = v2(160, 120); state = ST_CREDITS; music_play_file("musCredits.ogg", true, 0); break;
         }
         tr_phase = 2;
     } else if (tr_phase == 1) {
@@ -590,8 +689,22 @@ static void play_events(uint64_t ev) {
     if (ev & EV_COIN) sfx_play("collectibles/coin.ogg", 1, 1);
     if (ev & EV_DEATH_WALL) sfx_play("minigame/meowl_die.ogg", 1, 1);
     if (ev & EV_OB) sfx_play("game/deathOB.ogg", 1, 1);
+    if (ev & EV_BURST) sfx_play("player/burst.ogg", 1, 1);
+    if (ev & EV_PARRY) sfx_play("player/parry.ogg", 1, 1);
+    if (ev & EV_BUDDY_DIE) play_jumpscare_sfx();
+    if (ev & EV_MISSILE_DING) sfx_play("gimmicks/timer_tick.ogg", 1.5f, 1);
+    if (ev & EV_MISSILE_BOOM) sfx_play("gimmicks/explosion1.ogg", 1, 1);
+    if (ev & EV_LAUNCH_DIZZY) sfx_play("player/hit_dizzy.ogg", game.launch_pitch, 1);
+    if (ev & EV_MAGIC) sfx_play("gimmicks/magic_1.ogg", 1, 1);
+    if (ev & EV_GOLDEN_TEE) {
+        music_play(-2);
+        sfx_play("gimmicks/golden_club_thwack.ogg", 1, 1);
+        pthru_cur()->can_swim = true;
+        pthru_flush();
+    }
+    if (ev & EV_COASTER_START) sfx_play("gimmicks/coaster.ogg", 1, 1);
     if (ev & EV_CAUGHT && set.jumpscares != 2) {
-        if (set.jumpscares == 0) sfx_play("ghost/defaultJumpscare.ogg", 1, 1);
+        if (set.jumpscares == 0) play_jumpscare_sfx();
         jumpscare_t = 50;
     }
     if (ev & EV_BACKROOMS) music_play(-2);
@@ -779,8 +892,9 @@ static void draw_sprite(const char *name, vec2 screen, float px_per_unit, float 
 
 // the uncanny face, 480x480, across both screens as one stacked 400x480 picture (bottom screen is 40px in)
 static void draw_jumpscare(bool top) {
-    if (!jumpscare_sheet) {
-        draw_sprite("costume_uncanny", v2(top ? 200 : 160, 120), top ? 6.0f : 4.0f, 1, 0xFFFFFFFF, 0);
+    const CostumeDef *c = villa_cur_costume();
+    if (!jumpscare_sheet || (c && strcmp(c->ghost_tag, "g_uncanny") != 0 && spr_find(ghost_spr()) >= 0)) {
+        draw_sprite(ghost_spr(), v2(top ? 200 : 160, 120), top ? 6.0f : 4.0f, 1, 0xFFFFFFFF, 0);
         return;
     }
     C2D_DrawImageAt(C2D_SpriteSheetGetImage(jumpscare_sheet, 0), top ? -40 : -80, top ? 0 : -240, 0.99f, NULL,
@@ -1031,7 +1145,7 @@ static void draw_course(void) {
     if (fu) {
         C2D_Image img = C2D_SpriteSheetGetImage(fu, 0);
         float cw = 2 * level.bounds * k, s = cw / level.image_size;
-        if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.1f, NULL, -s, s);
+        if (game.mirror_active) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.1f, NULL, -s, s);
         else C2D_DrawImageAt(img, course_left(), course_top(), 0.1f, NULL, s, s);
     }
     // fixed depths, bottom to top (goal.tscn: hole and flag under player.tscn's cat); citro2d keeps the
@@ -1104,7 +1218,29 @@ static void draw_course(void) {
     ui_z = game.pstate == PS_JUMP ? 0.72f : 0.4f; // PJump: z_index 1, over everything in the level
     if (game.sprite_visible) {
         float sc = game.sprite_scale / 0.064f;
-        draw_sprite("costume_canny", world_to_screen(game.pos), k, sc, lit(true), 0);
+        u32 ptint = (game.pstate == PS_PARRY || game.parry_active > 23) ? C2D_Color32(180, 230, 255, 255) : lit(true);
+        draw_sprite(player_spr(), world_to_screen(game.pos), k, sc, ptint, game.sprite_rot);
+    }
+    if (game.set.mods & MOD_JUMPY) {
+        vec2 jp = world_to_screen(game.pos);
+        float ratio = 1.0f - clampf(game.jumpy_dist / 1024.0f, 0.0f, 1.0f);
+        C2D_DrawRectSolid(jp.x - 16, jp.y + 14, 0.41f, 32, 4, C2D_Color32(20, 20, 20, 200));
+        C2D_DrawRectSolid(jp.x - 15, jp.y + 15, 0.42f, 30 * ratio, 2, C2D_Color32(90, 255, 130, 255));
+    }
+    if (game.buddy_on) {
+        vec2 bp = world_to_screen(game.buddy_pos);
+        if (game.buddy_dead) draw_spr(spr_find("gravestone"), bp, k * 0.6f, k * 0.6f, WHITE, 0);
+        else draw_sprite(player_spr(), bp, k, game.buddy_scale * 0.6f, WHITE, 0);
+    }
+    if (game.golden_tee_dropped)
+        draw_spr(spr_find("golden_tee"), world_to_screen(v2(0, 0)), k, k, WHITE, 0);
+    if (game.wizard_on && game.wizard_hp > 0)
+        draw_dyn(game.wizard_spr, game.wizard_pos, k, game.wizard_cast_t > 0 ? C2D_Color32(255, 180, 255, 255) : WHITE);
+    for (int i = 0; game.coaster_on && i < 24; i++) {
+        if (!game.coaster_objs[i].active) continue;
+        vec2 cp = world_to_screen(game.coaster_objs[i].pos);
+        if (game.coaster_objs[i].is_ghost) draw_sprite(ghost_spr(), cp, k, 1.0f, WHITE, 0);
+        else draw_sprite("coin", cp, k, 1.0f, WHITE, 0);
     }
     // horse goals (par balls), mines, the horse
     ui_z = 0.26f;
@@ -1133,16 +1269,34 @@ static void draw_course(void) {
     for (int i = 0; i < game.nghosts; i++) // final_ghost.tscn: Sprite2D scale 0.172 (0.064 on a ghost), times its own
         if (game.ghosts[i].alive) {
             u32 c = lit(true);
-            if (game.ghosts[i].frozen) c = (c & 0x00FFFFFF) | 0x80000000; // metronome.gd: modulate.a = 0.5
-            draw_sprite("costume_uncanny", world_to_screen(game.ghosts[i].pos), k,
+            if (game.ghosts[i].frozen || game.ghosts[i].parry_stun > 0) c = (c & 0x00FFFFFF) | 0x80000000;
+            draw_sprite(ghost_spr(), world_to_screen(game.ghosts[i].pos), k,
                         game.ghosts[i].final ? game.ghosts[i].scale * 0.172f / 0.064f : 1, c, 0);
         }
-    if (game.hit_visible && game.pstate == PS_IDLE) {
+    if (in_endless && endless.demon_active) {
+        vec2 dp_ = world_to_screen(endless.demon_pos);
+        draw_spr(spr_find(endless.demon_radical ? "rad_demon" : "red_demon"), dp_, k * 0.5f, k * 0.5f, WHITE, 0);
+    }
+    if (game.missile_on) {
+        vec2 mp = world_to_screen(game.missile_pos);
+        u32 mc = game.missile_timer <= 60 ? C2D_Color32(255, 60, 60, 255) : WHITE;
+        draw_spr(spr_find("reticle"), mp, k * 0.8f, k * 0.8f, mc, 0);
+        if (game.missile_hitbox_t > 0) draw_spr(spr_find("explosion"), mp, k, k, WHITE, 0);
+    }
+    for (int i = 0; i < game.nbees; i++)
+        draw_spr(spr_find((game.frame / 4 + i) % 2 ? "bee_0" : "bee_1"),
+                 world_to_screen(game.bees[i].pos), k, k, WHITE, 0);
+    for (int i = 0; i < game.neborts; i++) {
+        char bn[16];
+        snprintf(bn, sizeof(bn), "bort_%d_%d", game.eborts[i].hue, (int)((game.frame / 6 + i) % 2));
+        draw_spr(spr_find(bn), world_to_screen(game.eborts[i].pos), k * 0.7f, k * 0.7f, WHITE, 0);
+    }
+    if (game.hit_visible && (game.pstate == PS_IDLE || (game.pstate == PS_MOVING && (game.set.mods & MOD_BURST)))) {
         float c[4];
         game_aim_color(&game, c);
         vec2 a = world_to_screen(game.pos);
         vec2 hit = game.hit;
-        if (level.flags & LF_MIRROR) hit.x = -hit.x;
+        if (game.mirror_active) hit.x = -hit.x;
         vec2 b = v2add(a, v2mul(hit, k));
         u32 col = C2D_Color32f(c[0], c[1], c[2], c[3]);
         C2D_DrawLine(a.x, a.y, col, b.x, b.y, col, fmaxf(2.0f, 4 * k), 0.6f);
@@ -1153,9 +1307,15 @@ static void draw_course(void) {
     if (fo) {
         C2D_Image img = C2D_SpriteSheetGetImage(fo, 0);
         float cw = 2 * level.bounds * k, s = cw / level.image_size;
-        if (level.flags & LF_MIRROR) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.7f, NULL, -s, s);
+        if (game.mirror_active) C2D_DrawImageAt(img, course_left() + cw, course_top(), 0.7f, NULL, -s, s);
         else C2D_DrawImageAt(img, course_left(), course_top(), 0.7f, NULL, s, s);
     }
+    if (game.slot_eyes)
+        draw_spr(spr_find("slot_eye"), world_to_screen(game.slot_machine_pos), k, k, WHITE, 0);
+    if (game.set.mods & MOD_E_PHARAOH)
+        C2D_DrawRectSolid(course_left(), 0, 0.75f, set.zoom ? BOT_W : COURSE_W, SCR_H, C2D_Color32(220, 175, 80, 45));
+    if (game.set.mods & MOD_E_OVERHEAT)
+        C2D_DrawRectSolid(course_left(), 0, 0.75f, set.zoom ? BOT_W : COURSE_W, SCR_H, C2D_Color32(255, 50, 20, 55));
     // slot_machine.tscn MarqueeText: 512 wide, 20 px font, blue outline, centred on the machine
     if (game.has_slot_machine) {
         static const char *KEY[] = {"GAME_SlotsDefault", "GAME_SlotsJackpot", "GAME_SlotsHappy", "GAME_SlotsOk",
@@ -1279,13 +1439,13 @@ static void draw_displayer(void) {
     bool have_img = thoughts_image(&img);
     PROF_END();
     if (have_img) C2D_DrawImageAt(img, DCX - 1.14f - tw / 2, DCY - 33.2f - th / 2, 0.25f, NULL, tw / 109, th / 89);
-    else draw_sprite("costume_canny", v2(DCX - 1, DCY - 33), 1.6f, 1, WHITE, 0);
+    else draw_sprite(player_spr(), v2(DCX - 1, DCY - 33), 1.6f, 1, WHITE, 0);
     ui_z = 0.3f;
     draw_hud("displayer", DCX, DCY, 1, WHITE);
     // the Thinker: Canny next to the computer (gone on a final_ghost_level)
     ui_z = 0.32f;
     if (!((state == ST_PLAY || state == ST_PAUSE) && (level.flags & LF_FINAL_GHOST)))
-        draw_sprite("costume_canny", v2(170, 204), 1.7f, 1, WHITE, 0);
+        draw_sprite(player_spr(), v2(170, 204), 1.7f, 1, WHITE, 0);
 }
 
 static void draw_horse_meter(void) {
@@ -1477,18 +1637,15 @@ static void level_name(char *b, size_t n, int w, int i) {
 }
 
 static int level_rank(int w, int i) {
-    char key[32], id[16];
-    level_name(id, sizeof(id), w, i);
-    snprintf(key, sizeof(key), "%s_rank", id);
-    return cfg_get_int(savedata, "LEVELS", key, -1);
+    if (w < 0 || w >= 7 || i < 0 || i >= 32) return -1;
+    return pthru_cur()->rec[w][i].rank;
 }
 
 // ---------------------------------------------------------------- minigames
-// minigame_menu.tscn: Bort Bash unlocks with 3-18 (its unlocks list), Meowls. with 1-18
 static const char *const MG_NAME_KEY[NMINIGAMES] = {"MINIGAME_Bart"};
 static bool minigame_unlocked(int which) {
     switch (which) {
-    case MG_BORT: return level_rank(3, 17) >= 0;
+    case MG_BORT: return g_save.unlocks[UL_MG_BORT] || level_rank(3, 17) >= 0;
     }
     return false;
 }
@@ -1569,7 +1726,7 @@ static void draw_minigame_top(void) {
     if (sel_cursor == MG_BORT) {
         if (open) {
             text_ol_wrap(8, 126, 0.45f, WHITE, 0, 200, tr("MINIGAME_Bart_Prompt"));
-            snprintf(b, sizeof(b), "Best Score: %d", cfg_get_int(savedata, "MINIGAMES", "bort_score", 0));
+            snprintf(b, sizeof(b), "Best Score: %d", g_save.bort_best);
             text_ol(8, 164, 0.45f, WHITE, 0, b);
         } else {
             text_ol_wrap(8, 126, 0.45f, grey(0.8f), 0, 200, "Clear 3-18 to unlock.");
@@ -1594,13 +1751,12 @@ static void draw_select_top(void) {
     snprintf(key, sizeof(key), "GAME_Level%s", id);
     snprintf(b, sizeof(b), "%s\n%s", id, tr(key));
     text_ol_wrap(8, 96, 0.5f, WHITE, 0, 200, b);
-    snprintf(key, sizeof(key), "%s_score", id);
-    int sc = cfg_get_int(savedata, "LEVELS", key, -1);
+    LevelRecord *rec = &pthru_cur()->rec[sel_world][sel_cursor];
+    int sc = rec->rank >= 0 ? rec->best_score : -1;
     snprintf(b, sizeof(b), "Best Score: %d", sc < 0 ? 0 : sc);
     text_ol(8, 146, 0.45f, WHITE, 0, b);
     if (sc >= 0) {
-        snprintf(key, sizeof(key), "%s_time", id);
-        format_time(v, sizeof(v), ms, sizeof(ms), cfg_get_float(savedata, "LEVELS", key, 0));
+        format_time(v, sizeof(v), ms, sizeof(ms), rec->best_time);
         snprintf(b, sizeof(b), "Best Time: %s%s", v, ms);
     } else {
         snprintf(b, sizeof(b), "Best Time: --:--.--");
@@ -1666,7 +1822,7 @@ static void start_minigame(int which) {
     bort_start(&bort, (u32)osGetTime() ^ (u32)svcGetSystemTick());
     bort_paused = false;
     bort_over_t = 0;
-    bort_best = cfg_get_int(savedata, "MINIGAMES", "bort_score", 0);
+    bort_best = g_save.bort_best;
     music_play(1);
     state = ST_BORT;
 }
@@ -1680,8 +1836,8 @@ static void bort_events(int ev) {
         sfx_play("gimmicks/slots_bad.ogg", 1, 1);
         if (bort.score > bort_best) {
             bort_best = bort.score;
-            cfg_set_int(savedata, "MINIGAMES", "bort_score", bort_best);
-            cfg_write_later(savedata);
+            g_save.bort_best = bort_best;
+            pthru_flush();
         }
     }
 }
@@ -2213,6 +2369,8 @@ static void draw_intro(void) {
         text_ol(160, 214, 0.45f, grey(0.95f), C2D_AlignCenter, "Tap to tee off");
 }
 
+#include "screens.inc"
+
 // ---------------------------------------------------------------- main
 // every gameplay sound (about 6 MB decoded). The worker thread decodes them all from boot, so none stalls
 // a level the first time it plays and the boot screen does not wait for them.
@@ -2239,7 +2397,10 @@ static const char *const PRELOAD[] = {
 // ---------------------------------------------------------------- loading behind the intro
 // The intro needs only its own art, the sprites (Canny), the top background and the font. Everything
 // else is read by the worker while the credits play, and turned into textures here a piece per frame.
-static const char *const BEHIND[] = {"gfx/hud.t3x", "gfx/menu.t3x", "gfx/settings_bg.t3x", "gfx/jumpscare.t3x"};
+static const char *const BEHIND[] = {
+    "gfx/hud.t3x", "gfx/menu.t3x", "gfx/settings_bg.t3x", "gfx/jumpscare.t3x",
+    "gfx/title.t3x", "gfx/costumes.t3x", "gfx/extras.t3x"
+};
 #define NBEHIND (int)(sizeof(BEHIND) / sizeof(BEHIND[0]))
 static int behind_done;
 
@@ -2249,6 +2410,9 @@ static void boot_piece(int i) {
     case 1: load_sheet(&menusheet, dp("gfx/menu.t3x"), dp("gfx/menu.txt")); break;
     case 2: settings_bg = sheet_load(dp("gfx/settings_bg.t3x")); break;
     case 3: jumpscare_sheet = sheet_load(dp("gfx/jumpscare.t3x")); break;
+    case 4: load_sheet(&title_sheet, dp("gfx/title.t3x"), dp("gfx/title.txt")); break;
+    case 5: load_sheet(&costume_sheet, dp("gfx/costumes.t3x"), dp("gfx/costumes_atlas.txt")); break;
+    case 6: load_sheet(&extras_sheet, dp("gfx/extras.t3x"), dp("gfx/extras.txt")); break;
     }
 }
 
@@ -2331,6 +2495,8 @@ int main(void) {
     thoughts_init();
     load_settings();
     savedata = cfg_open("save_data.ini");
+    pthru_init();
+    villa_load_catalogs();
     apply_settings();
     worker_start();
     for (int i = 0; i < NBEHIND; i++) prefetch(dp(BEHIND[i]));
@@ -2344,10 +2510,17 @@ int main(void) {
     fps_since = osGetTime();
     tr_in = 1.0f / 60 / 0.5f; // the credits fade in over half a second
 
+    u64 last_ms = osGetTime();
+    float phys_acc = 0.0f;
 #if UCG_PROFILE
     int frame_no = 0;
 #endif
     while (aptMainLoop()) {
+        u64 now_ms = osGetTime();
+        float dt_ms = (float)(now_ms - last_ms);
+        last_ms = now_ms;
+        if (dt_ms < 0.0f) dt_ms = 0.0f;
+        if (dt_ms > 40.0f) dt_ms = 40.0f;
         PROF_FRAME_BEGIN();
         hidScanInput();
         u32 kd = hidKeysDown(), kh = hidKeysHeld(), ku = hidKeysUp();
@@ -2428,7 +2601,7 @@ int main(void) {
             if (dw) {
                 int w = sel_world;
                 do w = (w + NWORLDS + dw) % NWORLDS;
-                while (!wcount[w]);
+                while (w == 7 || !wcount[w]);
                 sel_world = w;
                 sel_cursor = sel_scroll = 0;
                 play = false;
@@ -2442,7 +2615,181 @@ int main(void) {
                 if (row < sel_scroll) sel_scroll = row;
                 if (row >= sel_scroll + GRID_ROWS) sel_scroll = row - GRID_ROWS + 1;
             }
+            if (kd & (KEY_B | KEY_START)) go(TR_MAIN_MENU, 0, 0);
+        } else if (state == ST_TITLE) {
+            title_idle++;
+            if (kd & (KEY_A | KEY_START | KEY_TOUCH)) go(TR_MAIN_MENU, 0, 0);
+            else if (title_idle > 900) go(TR_ATTRACT, 0, 0);
+        } else if (state == ST_ATTRACT) {
+            game_tick(&game, &(GameInput){0});
+            camera_follow(game.pos, false);
+            if (kd & (KEY_A | KEY_B | KEY_START | KEY_TOUCH) || game.victory || game.lose)
+                go(TR_TITLE, 0, 0);
+        } else if (state == ST_MAIN_MENU) {
+            if (kd & KEY_DOWN) main_cursor = (main_cursor + 1) % 4;
+            if (kd & KEY_UP) main_cursor = (main_cursor + 3) % 4;
+            int pick = (kd & KEY_A) ? main_cursor : -1;
+            if (tdown)
+                for (int i = 0; i < 4; i++)
+                    if (tap_box(touch, 40, 54 + i * 42, 240, 36)) pick = i;
+            if (pick == 0) go(TR_PTHRU_SELECT, 0, 0);
+            else if (pick == 1) {
+                if (g_save.unlocks[UL_MODE_ENDLESS]) go(TR_ENDLESS_START, 0, 0);
+                else sfx_play("gimmicks/slots_bad.ogg", 1, 1);
+            } else if (pick == 2) go(TR_VILLA, 0, 0);
+            else if (pick == 3) go(TR_SETTINGS, ST_MAIN_MENU, 0);
             if (kd & KEY_START) break;
+        } else if (state == ST_PTHRU_SELECT) {
+            if (kd & KEY_DOWN) pthru_cursor = (pthru_cursor + 1) % MAX_PTHRUS;
+            if (kd & KEY_UP) pthru_cursor = (pthru_cursor + MAX_PTHRUS - 1) % MAX_PTHRUS;
+            if (tdown) {
+                for (int i = 0; i < MAX_PTHRUS; i++)
+                    if (tap_box(touch, 16, 34 + i * 28, 288, 25)) pthru_cursor = i;
+                if (tap_box(touch, 12, 206, 92, 28) && g_save.pthrus[pthru_cursor].used) {
+                    g_save.active_pthru = pthru_cursor;
+                    go(TR_SELECT, 0, 0);
+                } else if (tap_box(touch, 114, 206, 92, 28)) go(TR_PTHRU_MAKE, 0, 0);
+                else if (tap_box(touch, 216, 206, 92, 28)) go(TR_MAIN_MENU, 0, 0);
+            }
+            if ((kd & KEY_A) && g_save.pthrus[pthru_cursor].used) {
+                g_save.active_pthru = pthru_cursor;
+                go(TR_SELECT, 0, 0);
+            }
+            if (kd & KEY_X) go(TR_PTHRU_MAKE, 0, 0);
+            if (kd & KEY_Y) pthru_delete(pthru_cursor);
+            if (kd & KEY_B) go(TR_MAIN_MENU, 0, 0);
+        } else if (state == ST_PTHRU_MAKE) {
+            if (kd & KEY_DOWN) make_cursor = (make_cursor + 2) % 13;
+            if (kd & KEY_UP) make_cursor = (make_cursor + 11) % 13;
+            if (kd & KEY_RIGHT) make_cursor = (make_cursor + 1) % 13;
+            if (kd & KEY_LEFT) make_cursor = (make_cursor + 12) % 13;
+            int tog = (kd & KEY_A) ? make_cursor : -1;
+            if (tdown) {
+                for (int i = 0; i < 11; i++)
+                    if (tap_box(touch, 10 + (i % 2) * 152, 30 + (i / 2) * 28, 148, 25)) tog = i;
+                if (tap_box(touch, 162, 30 + 5 * 28, 148, 25)) tog = 11;
+                if (tap_box(touch, 16, 206, 138, 28)) tog = 12;
+                if (tap_box(touch, 166, 206, 138, 28)) go(TR_PTHRU_SELECT, 0, 0);
+            }
+            if (tog >= 0 && tog < 11 && g_save.unlocks[MOD_LIST[tog].ul]) make_mods ^= MOD_LIST[tog].bit;
+            else if (tog == 11 && g_save.unlocks[UL_PEAK_HUNTER]) make_peak = !make_peak;
+            else if (tog == 12) {
+                int slot = pthru_cursor;
+                for (int i = 0; i < MAX_PTHRUS; i++) if (!g_save.pthrus[i].used) { slot = i; break; }
+                char rname[24];
+                snprintf(rname, sizeof(rname), "Run %d", slot + 1);
+                pthru_create(slot, rname, make_mods, make_peak);
+                go(TR_SELECT, 0, 0);
+            }
+            if (kd & KEY_B) go(TR_PTHRU_SELECT, 0, 0);
+        } else if (state == ST_ENDLESS_OVER) {
+            if ((kd & KEY_A) || (tdown && tap_box(touch, 40, 146, 240, 36))) go(TR_ENDLESS_START, 0, 0);
+            if ((kd & KEY_B) || (tdown && tap_box(touch, 40, 190, 240, 36))) go(TR_MAIN_MENU, 0, 0);
+        } else if (state == ST_WORLD_RESULTS || state == ST_ENDING || state == ST_FINAL_RESULTS) {
+            cutscene_t++;
+            if ((kd & KEY_A) || (tdown && tap_box(touch, 40, 190, 240, 36))) {
+                if (state == ST_WORLD_RESULTS && cutscene_world + 1 < 7)
+                    go(TR_START, cutscene_world + 1, 0);
+                else
+                    go(TR_SELECT, 0, 0);
+            }
+        } else if (state == ST_VILLA) {
+            if (kd & KEY_DOWN) villa_cursor = (villa_cursor + 1) % 6;
+            if (kd & KEY_UP) villa_cursor = (villa_cursor + 5) % 6;
+            int pick = (kd & KEY_A) ? villa_cursor : -1;
+            if (tdown)
+                for (int i = 0; i < 6; i++)
+                    if (tap_box(touch, 40, 18 + i * 36, 240, 31)) pick = i;
+            if (pick == 0) { if (g_save.unlocks[UL_EX_COSTUMES]) go(TR_COSTUMES, 0, 0); }
+            else if (pick == 1) { if (g_save.unlocks[UL_EX_SOUNDTEST]) go(TR_SOUND_TEST, 0, 0); }
+            else if (pick == 2) { if (g_save.unlocks[UL_EX_PHONE]) go(TR_PHONE, 0, 0); }
+            else if (pick == 3) go(TR_CREDITS, 0, 0);
+            else if (pick == 4) { sel_world = MG_WORLD; sel_cursor = 0; go(TR_SELECT, 0, 0); }
+            else if (pick == 5 || (kd & KEY_B)) go(TR_MAIN_MENU, 0, 0);
+        } else if (state == ST_COSTUMES) {
+            if (kd & KEY_DOWN && cost_cursor + 1 < g_ncostumes) cost_cursor++;
+            if (kd & KEY_UP && cost_cursor > 0) cost_cursor--;
+            int pick = (kd & KEY_A) ? cost_cursor : -1;
+            if (tdown) {
+                for (int r = 0; r < 5; r++)
+                    if (cost_scroll + r < g_ncostumes && tap_box(touch, 20, 34 + r * 33, 280, 29))
+                        pick = cost_cursor = cost_scroll + r;
+                if (tap_box(touch, 20, 204, 280, 28)) go(TR_VILLA, 0, 0);
+            }
+            if (cost_cursor < cost_scroll) cost_scroll = cost_cursor;
+            if (cost_cursor >= cost_scroll + 5) cost_scroll = cost_cursor - 4;
+            if (pick >= 0 && pick < g_ncostumes && villa_costume_unlocked(pick)) {
+                snprintf(g_save.current_costume, sizeof(g_save.current_costume), "%s", g_costumes[pick].id);
+                pthru_flush();
+                sfx_play(g_costumes[pick].sfx, 1, 1);
+            }
+            if (kd & KEY_B) go(TR_VILLA, 0, 0);
+        } else if (state == ST_SOUND_TEST) {
+            st_cd_rot += (st_playing >= 0 && !st_paused) ? (st_pause_mix ? 0.03f : 0.06f) : 0;
+            if (kd & KEY_DOWN && st_cursor + 1 < g_nsongs) st_cursor++;
+            if (kd & KEY_UP && st_cursor > 0) st_cursor--;
+            int pick = (kd & KEY_A) ? st_cursor : -1;
+            if (tdown) {
+                for (int r = 0; r < 5; r++)
+                    if (st_scroll + r < g_nsongs && tap_box(touch, 16, 10 + r * 34, 288, 30))
+                        pick = st_cursor = st_scroll + r;
+                if (tap_box(touch, 16, 190, 90, 36) && st_playing >= 0) {
+                    st_paused = !st_paused;
+                    music_set_paused(st_paused);
+                } else if (tap_box(touch, 114, 190, 104, 36)) {
+                    st_pause_mix = !st_pause_mix;
+                    music_set_pitch(st_pause_mix ? 0.75f : 1.0f);
+                } else if (tap_box(touch, 226, 190, 78, 36)) {
+                    music_set_pitch(1.0f);
+                    go(TR_VILLA, 0, 0);
+                }
+            }
+            if (st_cursor < st_scroll) st_scroll = st_cursor;
+            if (st_cursor >= st_scroll + 5) st_scroll = st_cursor - 4;
+            if (pick >= 0 && pick < g_nsongs && villa_song_unlocked(pick)) {
+                st_playing = pick;
+                st_paused = false;
+                music_set_pitch(st_pause_mix ? 0.75f : 1.0f);
+                music_play_file(g_songs[pick].file, g_songs[pick].loop, g_songs[pick].loop_offset);
+            }
+            if (kd & KEY_B) { music_set_pitch(1.0f); go(TR_VILLA, 0, 0); }
+        } else if (state == ST_PHONE) {
+            if (phone_tick(&phone, tr)) {
+                if (phone.has_audio) music_play_file(phone.audio_rel, false, 0);
+                else sfx_play("menu/phone_accept.ogg", 1, 1);
+            }
+            if (tdown) {
+                static const char KCH[12] = {'1','2','3','4','5','6','7','8','9','*','0','#'};
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 3; c++)
+                        if (tap_box(touch, 40 + c * 82, 12 + r * 42, 76, 36)) {
+                            phone_press(&phone, KCH[r * 3 + c]);
+                            sfx_play("player/grab.ogg", 1, 1);
+                        }
+                if (tap_box(touch, 24, 190, 86, 38)) phone_del(&phone);
+                else if (tap_box(touch, 116, 190, 96, 38)) {
+                    if (phone.phase == PHONE_IN_CALL) {
+                        phone_next(&phone, tr);
+                        if (phone.phase == PHONE_IDLE) music_play_file("musPhone.ogg", true, 0);
+                    } else {
+                        phone_call(&phone);
+                    }
+                } else if (tap_box(touch, 218, 190, 78, 38)) go(TR_VILLA, 0, 0);
+            }
+            if (kd & KEY_B) go(TR_VILLA, 0, 0);
+        } else if (state == ST_CREDITS) {
+            circlePosition cp;
+            hidCircleRead(&cp);
+            credits_pos.x = clampf(credits_pos.x + cp.dx / 60.0f, 36, 284);
+            credits_pos.y = clampf(credits_pos.y - cp.dy / 60.0f, 36, 184);
+            if (kd & KEY_L) credits_room = (credits_room + 3) % 4;
+            if (kd & KEY_R) credits_room = (credits_room + 1) % 4;
+            if (tdown) {
+                if (tap_box(touch, 20, 200, 90, 32)) credits_room = (credits_room + 3) % 4;
+                else if (tap_box(touch, 115, 200, 90, 32)) go(TR_VILLA, 0, 0);
+                else if (tap_box(touch, 210, 200, 90, 32)) credits_room = (credits_room + 1) % 4;
+            }
+            if (kd & (KEY_B | KEY_START)) go(TR_VILLA, 0, 0);
         } else if (state == ST_SETTINGS) {
             settings_input(kd, tdown, theld, tup, touch);
         } else if (state == ST_PAUSE) {
@@ -2454,10 +2801,10 @@ int main(void) {
             if (tdown)
                 for (int i = 0; i < 4; i++)
                     if (tap_box(touch, PAUSE_X, PAUSE_Y + i * PAUSE_STEP, PAUSE_W, PAUSE_H)) pick = i;
-            if (pick == 0) state = ST_PLAY;
-            else if (pick == 1) go(TR_START, cur_world, cur_level);
+            if (pick == 0) { state = ST_PLAY; music_set_pitch(1.0f); }
+            else if (pick == 1) { music_set_pitch(1.0f); if (in_endless) { endless_switch(&endless, 1, 0, 0, game.goal_pos); go(TR_ENDLESS_NEXT, 0, 0); } else go(TR_START, cur_world, cur_level); }
             else if (pick == 2) go(TR_SETTINGS, ST_PAUSE, 0);
-            else if (pick == 3) go(TR_SELECT, 0, 0);
+            else if (pick == 3) { music_set_pitch(1.0f); go(in_endless ? TR_MAIN_MENU : TR_SELECT, 0, 0); }
         } else if (state == ST_PLAY) {
             GameInput in;
             memset(&in, 0, sizeof(in));
@@ -2493,6 +2840,18 @@ int main(void) {
             in.restart_pressed = (kd & KEY_Y) || restart_btn;
             in.skip_down = (kh & KEY_X) || skip_btn;
             in.pause_pressed = (kd & KEY_START) || pause_btn;
+            in.parry_pressed = (kd & (KEY_R | KEY_B)) != 0;
+            in.teleport_pressed = (kh & KEY_R) && tdown;
+            {
+                circlePosition cp;
+                hidCircleRead(&cp);
+                static vec2 prev_touch;
+                vec2 d = v2(0, 0);
+                if (tdown) prev_touch = touch;
+                if (theld) { d = v2sub(touch, prev_touch); prev_touch = touch; }
+                else if (abs(cp.dx) > 12 || abs(cp.dy) > 12) d = v2(cp.dx / 24.0f, -cp.dy / 24.0f);
+                in.tk_delta = d;
+            }
             in.beat = music_beat();
 
             if (game.victory) {
@@ -2521,27 +2880,64 @@ int main(void) {
                     }
                 }
             } else {
-                game_tick(&game, &in);
-                camera_follow(game.pos, false);
-                play_events(game.events);
-                play_thought(game.thought);
-                if (in.skip_down && !(level.flags & LF_UNSKIPPABLE)) thoughts_play("Idle");
-                if (game.events & EV_WIN) {
-                    char id[16];
-                    snprintf(id, sizeof(id), "%s", level.id);
-                    // pthru.gd: a level that hides its score counts as a P
-                    record_result(id, game.final_score, game.time,
-                                  (level.flags & LF_HIDE_SCORING) ? RANK_PEAK : game.rank, game.strokes);
+                int steps = 1;
+                if (!new3ds) {
+                    phys_acc += dt_ms;
+                    steps = 0;
+                    while (phys_acc >= 16.6667f && steps < 2) {
+                        phys_acc -= 16.6667f;
+                        steps++;
+                    }
+                    if (steps == 0) steps = 1, phys_acc = 0.0f;
                 }
-                if (game.progress == PROG_RESET || game.progress == PROG_WIN_RESET) go(TR_START, cur_world, cur_level);
-                else if (game.progress == PROG_SKIP) go(TR_NEXT, 0, 0);
+                for (int st = 0; st < steps && !game.victory; st++) {
+                    game_tick(&game, st == 0 ? &in : &(GameInput){.mouse = in.mouse, .beat = in.beat});
+                    if (in_endless) {
+                        endless_tick(&endless, game.pos, TICK);
+                        if (endless.events & EEV_DEMON_HIT) {
+                            sfx_play("ghost/defaultJumpscare.ogg", 1, 1);
+                            jumpscare_t = 35;
+                        }
+                        if (endless.events & EEV_GAME_OVER) {
+                            go(TR_ENDLESS_OVER, 0, 0);
+                            break;
+                        }
+                    }
+                    play_events(game.events);
+                    play_thought(game.thought);
+                    if (game.events & EV_WIN) {
+                        if (in_endless) {
+                            endless_switch(&endless, 0, game.final_score, level.on_time, game.goal_pos);
+                            go(TR_ENDLESS_NEXT, 0, 0);
+                            break;
+                        }
+                        char id[16];
+                        snprintf(id, sizeof(id), "%s", level.id);
+                        record_result(id, game.final_score, game.time,
+                                      (level.flags & LF_HIDE_SCORING) ? RANK_PEAK : game.rank, game.strokes);
+                        if (level.flags & LF_GOLDEN_TEE) game.golden_tee_dropped = true;
+                    }
+                }
+                camera_follow((level.flags & LF_SANTA_SCROLL) ? v2(game.pos.x, game.santa_cam_y) : game.pos, false);
+                if (in.skip_down && !(level.flags & LF_UNSKIPPABLE)) thoughts_play("Idle");
+                if (in_endless) {
+                    if (game.progress == PROG_RESET) {
+                        endless_switch(&endless, 1, 0, 0, game.goal_pos);
+                        go(TR_ENDLESS_NEXT, 0, 0);
+                    } else if (game.progress == PROG_SKIP && endless.skips > 0) {
+                        endless_switch(&endless, 2, 0, 0, game.goal_pos);
+                        go(TR_ENDLESS_NEXT, 0, 0);
+                    }
+                } else {
+                    if (game.progress == PROG_RESET || game.progress == PROG_WIN_RESET) go(TR_START, cur_world, cur_level);
+                    else if (game.progress == PROG_SKIP || game.progress == PROG_GOLDEN_TEE) go(TR_NEXT, 0, 0);
+                }
             }
-            // pause works the whole time a course is up: before the cat drops in, after a death and on
-            // the results too (the original's level.gd only allows it while the level is active)
             if (in.pause_pressed && state == ST_PLAY && tr_phase != 1) {
                 state = ST_PAUSE;
                 pause_cursor = 0;
                 sfx_play("player/grab.ogg", 1, 1);
+                if (!(level.flags & LF_METRONOME)) music_set_pitch(0.75f);
             }
             if (jumpscare_t > 0) jumpscare_t--;
             if (ashbaby_a > 0) ashbaby_a -= 2;
@@ -2573,11 +2969,24 @@ int main(void) {
         C2D_SceneBegin(top);
         ui_z = 0.5f;
         if (state == ST_INTRO) draw_intro_top();
+        else if (state == ST_TITLE) draw_title_top();
+        else if (state == ST_MAIN_MENU) draw_main_menu_top();
+        else if (state == ST_PTHRU_SELECT) draw_pthru_select_top();
+        else if (state == ST_PTHRU_MAKE) draw_pthru_make_top();
+        else if (state == ST_ENDLESS_OVER) draw_endless_over_top();
+        else if (state == ST_WORLD_RESULTS || state == ST_ENDING || state == ST_FINAL_RESULTS) draw_cutscene_top();
+        else if (state == ST_VILLA) draw_villa_top();
+        else if (state == ST_COSTUMES) draw_costumes_top();
+        else if (state == ST_SOUND_TEST) draw_soundtest_top();
+        else if (state == ST_PHONE) draw_phone_top();
+        else if (state == ST_CREDITS) draw_credits_top();
         else if (state == ST_SELECT) draw_select_top();
         else if (state == ST_BORT) draw_bort_top();
         else if (state == ST_SETTINGS) draw_settings_top();
+        else if (in_endless && (state == ST_PLAY || state == ST_PAUSE)) draw_endless_top();
         else if (game.victory && win_t > 20) draw_results_top();
         else draw_top_hud();
+        draw_unlock_toast();
         ui_z = 0.99f;
         if (jumpscare_t > 0) draw_jumpscare(true);
         draw_ashbaby(true);
@@ -2586,9 +2995,20 @@ int main(void) {
         C2D_SceneBegin(bot);
         ui_z = 0.5f;
         if (state == ST_INTRO) draw_intro();
+        else if (state == ST_TITLE) draw_title_bot();
+        else if (state == ST_MAIN_MENU) draw_main_menu();
+        else if (state == ST_PTHRU_SELECT) draw_pthru_select();
+        else if (state == ST_PTHRU_MAKE) draw_pthru_make();
+        else if (state == ST_ENDLESS_OVER) draw_endless_over();
+        else if (state == ST_WORLD_RESULTS || state == ST_ENDING || state == ST_FINAL_RESULTS) draw_cutscene_bot();
+        else if (state == ST_VILLA) draw_villa_bot();
+        else if (state == ST_COSTUMES) draw_costumes_bot();
+        else if (state == ST_SOUND_TEST) draw_soundtest_bot();
+        else if (state == ST_PHONE) draw_phone_bot();
+        else if (state == ST_CREDITS) draw_credits_bot();
         else if (state == ST_SELECT) draw_select();
         else if (state == ST_BORT) draw_bort();
-        else if (state == ST_SETTINGS && settings_back == ST_SELECT) draw_settings();
+        else if (state == ST_SETTINGS && settings_back != ST_PAUSE) draw_settings();
         else {
             draw_course();
             ui_z = 0.97f;
@@ -2634,9 +3054,15 @@ int main(void) {
         PROF_MARK("~frame end");
 #if UCG_PROFILE
         {
-            static const char *SN[] = {"select", "play", "pause", "settings", "intro", "bort"};
+            static const char *SN[] = {
+                "select", "play", "pause", "settings", "intro", "bort",
+                "title", "attract", "main_menu", "pthru_sel", "pthru_make",
+                "endless_over", "world_res", "ending", "final_res",
+                "villa", "costumes", "sound_test", "phone", "credits"
+            };
             char what[48];
-            snprintf(what, sizeof(what), "%s %s%s", SN[state], state == ST_SELECT ? "" : level.id,
+            const char *sname = (state >= 0 && state < (int)(sizeof(SN) / sizeof(SN[0]))) ? SN[state] : "other";
+            snprintf(what, sizeof(what), "%s %s%s", sname, state == ST_SELECT ? "" : level.id,
                      game.victory ? " won" : game.lose ? " lost" : "");
             prof_frame_end(++frame_no, what);
         }
@@ -2652,6 +3078,9 @@ int main(void) {
     if (sprites) C2D_SpriteSheetFree(sprites);
     if (hudsheet) C2D_SpriteSheetFree(hudsheet);
     if (top_bg) C2D_SpriteSheetFree(top_bg);
+    if (title_sheet) C2D_SpriteSheetFree(title_sheet);
+    if (costume_sheet) C2D_SpriteSheetFree(costume_sheet);
+    if (extras_sheet) C2D_SpriteSheetFree(extras_sheet);
     lang_free(&lang_en);
     lang_free(&lang_cur);
     C2D_Fini();

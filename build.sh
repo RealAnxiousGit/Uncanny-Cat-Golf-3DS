@@ -8,12 +8,19 @@
 #   ./build.sh sdcard                             make that folder: $WORK/sdcard/Uncanny Cat Golf/
 #   ./build.sh sim                                  build and run the PC physics check
 #   ./build.sh gimtest <world> [level]              try shots at each gimmick on the PC
+#   ./build.sh modtest                              run the 1.0 modifiers, endless & special-level tests
 # SOURCE points at the unpacked "Uncanny Cat Golf (source)" folder.
 set -e
 export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
 export DEVKITARM=${DEVKITARM:-$DEVKITPRO/devkitARM}
-export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$HOME/fs3ds-tools/mr:$HOME/fs3ds-tools/bt:$PATH"
-SOURCE=${SOURCE:-/mnt/c/Users/NickBin/Downloads/uncanny-cat-golf-source}
+export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$HOME/fs3ds-tools/mr:$HOME/fs3ds-tools/bt:$HOME/fs3ds-tools/bt/bannertool-1.2.3-linux:$PATH"
+if [ -z "${SOURCE:-}" ]; then
+  if [ -d "/mnt/c/Users/NickBin/Downloads/uncanny-cat-golf-source" ]; then
+    SOURCE="/mnt/c/Users/NickBin/Downloads/uncanny-cat-golf-source"
+  else
+    SOURCE="/mnt/f/uncanny-cat-golf-source"
+  fi
+fi
 REPO="$(cd "$(dirname "$0")" && pwd)"
 WORK=${WORK:-$HOME/ucg3ds}
 
@@ -59,6 +66,10 @@ case "$cmd" in
   gimtest)
     nice -n 10 make -C pc -j3 gimtest
     ./pc/gimtest "$WORK/build/romfs" "$@"
+    ;;
+  modtest)
+    nice -n 10 make -C pc -j3 modtest
+    ./pc/modtest "$WORK/build/romfs" "$@"
     ;;
   *) echo "unknown command $cmd"; exit 1 ;;
 esac

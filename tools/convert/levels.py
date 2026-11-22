@@ -47,6 +47,7 @@ DYNAMIC = {
     "horse_boss.tscn": "horse",
     "horse_goal.tscn": "hgoal",
     "land_mine.tscn": "mine",
+    "wizard_ghost.tscn": "wizard",
 }
 CAR_SCENE = "res://assetsNEW/scenes/objects/baddies/car.tscn"
 SPAWNER_SCENE = "res://assetsNEW/scenes/objects/baddies/baddie_spawner.tscn"
@@ -57,7 +58,7 @@ ZONES = {"sand_pit.tscn": "sand", "water_death.tscn": "water"}
 # Objects drawn at runtime from their own baked picture (<id>_d.t3x)
 PICTURED = {"dblock", "keydoor", "key", "skull", "token", "jumppad", "spawner", "car",
             "switch", "dog", "doggoal", "ring", "scoin", "portal", "nuke", "fakegoal", "prismgate",
-            "horse", "hgoal", "mine"}
+            "horse", "hgoal", "mine", "wizard"}
 # the node that gets graphic.modulate = level.level_shade in each object's _ready()
 SHADED = {"skull": "AnimatedSprite2D", "car": "Sprite2D", "token": "AnimatedSprite2D", "spawner": "Door",
           "jumppad": "Sprite2D", "dog": "Sprite2D", "doggoal": "AnimatedSprite2D", "ring": "AnimatedSprite2D",
@@ -599,8 +600,16 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
     alt_canvas = None
     easy_only = []  # easy_mode_ending.gd objects_to_add: freed outside easy mode
     metronomes = []  # (node, [entries]) in scene order
+    extra_flags = []
     for n in root.walk():
         base = os.path.basename(n.scene) if n.scene else ""
+        if n.script is not None and str(getattr(n.script, "path", n.script)).endswith("santa.gd"):
+            if "santa_scroll" not in extra_flags:
+                extra_flags.append("santa_scroll")
+        if base == "golden_tee.tscn":
+            if "golden_tee" not in extra_flags:
+                extra_flags.append("golden_tee")
+            dynamic_roots.add(id(n))
         if base == "metronome.tscn":
             m = len(metronomes)
             entries = [_resolve(n, path) for path in (n.get("TriggerList") or [])]
@@ -716,6 +725,27 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
                 for poly in _zone_polys(n):
                     zones.append(("bossappear", poly))
                 objects.append(("bossappear", S.apply(S.global_xform(n), (0, 0)), 0.0, 1.0, 1.0, [], True))
+                node_of.append(n)
+                continue
+            if base == "coaster_starter.tscn":  # 3-18 coaster_starter.gd + coaster_oncoming.gd
+                dynamic_roots.add(id(n))
+                for poly in _zone_polys(n):
+                    zones.append(("coaster", poly))
+                onc = root.find("Gimmicks/Oncoming")
+                oy = S.apply(S.global_xform(onc), (0, 0))[1] if onc is not None else 80.0
+                sy_list = [S.apply(S.global_xform(c), (0, 0))[1] for c in (onc.children if onc else [])]
+                while len(sy_list) < 4:
+                    sy_list.append(oy)
+                cparams = [
+                    "coins_to_exit=%d" % int(n.get("coins_to_exit", 25) or 25),
+                    "speed=%s" % _fmt(float(onc.get("speed", -800.0) if onc else -800.0)),
+                    "spawn_offset=%s" % _fmt(float(onc.get("spawn_offset", 1200.0) if onc else 1200.0)),
+                    "screen_edge=%s" % _fmt(float(onc.get("screen_edge", 320.0) if onc else 320.0)),
+                    "kill_edge=%s" % _fmt(float(onc.get("kill_edge", -400.0) if onc else -400.0)),
+                    "slot0=%s" % _fmt(sy_list[0]), "slot1=%s" % _fmt(sy_list[1]),
+                    "slot2=%s" % _fmt(sy_list[2]), "slot3=%s" % _fmt(sy_list[3]),
+                ]
+                objects.append(("coaster", S.apply(S.global_xform(n), (0, 0)), 0.0, 1.0, 1.0, cparams, True))
                 node_of.append(n)
                 continue
             if base in ("lights_out_event.tscn", "ash_baby_event.tscn"):  # CustomEvent areas, once each
@@ -984,6 +1014,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
             over2.image().save(os.path.join(out_dir, out_name + "_o2.png"))
 
     shade = S.color(p.get("level_shade"))
+    flags_list = [f for f in LEVEL_FLAGS if p.get(f)] + extra_flags
     lines = ["ucgl 1",
              "id %s" % lid,
              "author %s" % p.get("lvl_author", ""),
@@ -993,7 +1024,7 @@ def convert_level(project, tc, res_path, out_dir, out_name, report):
              "ranks %s" % " ".join(str(int(x)) for x in (p.get("rank_reqs") or [0, 1, 4500, 5500, 6000, 7500])),
              "music %d" % int(p.get("music", -1)),
              "shade %s" % " ".join(_fmt(c) for c in shade),
-             "flags %s" % " ".join(f for f in LEVEL_FLAGS if p.get(f)),
+             "flags %s" % " ".join(flags_list),
              "image %d %s" % (size, "uo" if has_over else "u")]
     for kind, bits, data in shapes:
         if kind == "gpoly":

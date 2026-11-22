@@ -26,11 +26,32 @@
 
 enum { PS_SPAWN, PS_IDLE, PS_MOVING, PS_WIN, PS_LOSE, PS_ATTRACT, PS_JUMP,
        PS_CUSTOM,   // PCustom: held still, hitbox off (the horse's defeat)
-       PS_WINFAKE }; // PWinFake: 5-3's fake stage clear
+       PS_WINFAKE,  // PWinFake: 5-3's fake stage clear
+       PS_PARRY,    // PParry: parry freeze-frame on ghost contact
+       PS_TELEKINETIC }; // PTelekinetic: telekinesis steering mode
 enum { DEATH_NORMAL, DEATH_OB, DEATH_BACKROOMS, DEATH_WALL, DEATH_HORSE, DEATH_WATER };
 enum { MODE_NORMAL, MODE_ENDLESS, MODE_DEMO };
 enum { RANK_UNCANNY, RANK_ATROCIOUS, RANK_STINKY, RANK_OK, RANK_SWAG, RANK_PEAK };
-enum { PROG_NONE, PROG_RESET, PROG_NORMAL, PROG_SKIP, PROG_WIN_RESET };
+enum { PROG_NONE, PROG_RESET, PROG_NORMAL, PROG_SKIP, PROG_WIN_RESET, PROG_GOLDEN_TEE };
+
+// Playthrough & Endless modifiers (modifiers.gd)
+enum {
+    MOD_EASY        = 1u << 0,
+    MOD_HARD        = 1u << 1,
+    MOD_BURST       = 1u << 2,
+    MOD_TELEKINESIS = 1u << 3,
+    MOD_BUDDY       = 1u << 4,
+    MOD_PARRY       = 1u << 5,
+    MOD_JUMPY       = 1u << 6,
+    MOD_DIZZY       = 1u << 7,
+    MOD_MISSILES    = 1u << 8,
+    MOD_STICKY      = 1u << 9,
+    MOD_GOD         = 1u << 10,
+    MOD_E_PHARAOH   = 1u << 11,
+    MOD_E_BORT      = 1u << 12,
+    MOD_E_BEES      = 1u << 13,
+    MOD_E_OVERHEAT  = 1u << 14,
+};
 
 // Sound and effect events raised during a tick (bit flags)
 enum {
@@ -74,6 +95,16 @@ enum {
 #define EV_MUTE (1ull << 52)      // the music stops
 #define EV_METRO_BEAT (1ull << 53) // metronome.gd _beat_sound (pitch metro_beat_pitch)
 #define EV_METRO_TRIG (1ull << 54) // a metronome's trigger sound (metro_trig: which ones)
+// Modifiers & W3-W6 special events
+#define EV_BURST        (1ull << 55)
+#define EV_PARRY        (1ull << 56)
+#define EV_BUDDY_DIE    (1ull << 57)
+#define EV_MISSILE_DING (1ull << 58)
+#define EV_MISSILE_BOOM (1ull << 59)
+#define EV_LAUNCH_DIZZY (1ull << 60)
+#define EV_MAGIC        (1ull << 61)
+#define EV_GOLDEN_TEE   (1ull << 62)
+#define EV_COASTER_START (1ull << 63)
 
 // Thought animations the top screen should show (thought_displayer categories)
 enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH_SAND, TH_SKULL, TH_CAR, TH_JUMP, TH_POLICE,
@@ -82,7 +113,9 @@ enum { TH_NONE, TH_IDLE, TH_MOVING, TH_WIN, TH_DEATH, TH_BACKROOMS, TH_MONEY, TH
 typedef struct {
     // positions are in the original's viewport pixels: the course is 0..512 on both axes
     vec2 mouse;
+    vec2 tk_delta;       // telekinesis steering delta (stylus delta or Circle Pad)
     bool click_pressed, click_down, click_released;
+    bool parry_pressed, teleport_pressed;
     bool restart_pressed, skip_down, pause_pressed;
     int beat;            // the music's beat number (metronome.gd), -1 if unknown
 } GameInput;
@@ -161,6 +194,7 @@ typedef struct {
     bool buffer_shot;
     int total_prisms; // the playthrough's prisms (pthru total_prisms: the best ranks added up)
     bool can_swim;    // pthru can_swim: the golden tee at 5-18 gives it, so every P level has it
+    uint32_t mods;    // active MOD_* bitmask
 } GameSettings;
 
 typedef struct {
@@ -190,7 +224,7 @@ typedef struct {
     int nghosts;
     // final_ghost.gd: a ghost that waits (inactive) until a fake goal wakes it, at its node's scale
     struct { vec2 pos, vel; bool alive, graze, inactive, final; float scale, hit;
-             int met, mslot; bool frozen; } ghosts[MAX_GHOSTS]; // metronome.gd: frozen and see-through when off
+             int met, mslot, parry_stun; bool frozen; } ghosts[MAX_GHOSTS]; // metronome.gd: frozen and see-through when off
     bool has_goal;
     vec2 goal_pos;
     float goal_r, goal_ry;
@@ -295,6 +329,37 @@ typedef struct {
     int ndemo;
     DemoShot demo[MAX_DEMO_SHOTS];
     int demo_timer;
+
+    // modifiers (player.gd, PMoving.gd, PParry.gd, PTelekinetic.gd, little_buddy.gd, missile_attacker.gd, bee.gd)
+    float tk_strokes, tk_pitch;
+    int parry_active, parry_timer;
+    vec2 parry_stored_vel;
+    float jumpy_dist, sprite_rot;
+    vec2 jumpy_last_pos, last_touch_world;
+    bool buddy_on, buddy_dead;
+    vec2 buddy_pos;
+    float buddy_scale, buddy_angle;
+    bool missile_on;
+    vec2 missile_pos;
+    int missile_timer, missile_hitbox_t;
+    int nbees;
+    struct { vec2 pos, vel; float accel, limit; } bees[20];
+    int neborts;
+    struct { vec2 pos, vel; int hue; } eborts[25];
+
+    // 3-18 coaster, 5-16 wizard, 5-18 golden tee, P-15 santa scroll
+    bool coaster_on, coaster_started, coaster_done;
+    int coaster_coins, coaster_target, coaster_timer, coaster_step;
+    float coaster_speed, coaster_spawn_x, coaster_screen_edge, coaster_kill_x;
+    float coaster_slot_y[4];
+    struct { vec2 pos; bool active, is_ghost; int slot; } coaster_objs[24];
+    bool wizard_on, wizard_wind_on;
+    vec2 wizard_pos;
+    int wizard_spr, wizard_hp, wizard_cast_t;
+    bool golden_tee_dropped, golden_tee_anim;
+    int golden_tee_timer;
+    float santa_cam_y, santa_min_y;
+    bool mirror_active; // runtime mirror (lv.flags & LF_MIRROR or 5-16 wizard spell)
 
     uint64_t events;
     int thought;

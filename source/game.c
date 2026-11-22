@@ -28,6 +28,12 @@
 #define BADDIE_DESPAWN 128
 #define POPUP_TIME 1.0f
 
+#define PARRY_ACTIVE 33
+#define PARRY_WINDOW 23
+#define PARRY_TIME 16
+#define JUMPY_DISTANCE 1024.0f
+#define DIZZY_INTENSITY 1.309f
+
 static void transition(Game *g, int st);
 static void state_update(Game *g, const GameInput *in);
 static void tracks_tick(Game *g);
@@ -714,6 +720,25 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
             g->slot_machine_pos = o->pos;
             g->skull_num = (int)obj_param(o, "skull_num", 30);
             break;
+        case OBJ_COASTER:
+            g->coaster_on = true;
+            g->coaster_target = (int)obj_param(o, "coins_to_exit", 25);
+            if (set->mods & MOD_HARD) g->coaster_target *= 2;
+            g->coaster_speed = obj_param(o, "speed", -800.0f);
+            g->coaster_spawn_x = obj_param(o, "spawn_offset", 1200.0f);
+            g->coaster_screen_edge = obj_param(o, "screen_edge", 320.0f);
+            g->coaster_kill_x = obj_param(o, "kill_edge", -400.0f);
+            g->coaster_slot_y[0] = obj_param(o, "slot0", 24.0f);
+            g->coaster_slot_y[1] = obj_param(o, "slot1", 61.333f);
+            g->coaster_slot_y[2] = obj_param(o, "slot2", 98.667f);
+            g->coaster_slot_y[3] = obj_param(o, "slot3", 136.0f);
+            break;
+        case OBJ_WIZARD:
+            g->wizard_on = true;
+            g->wizard_pos = o->pos;
+            g->wizard_spr = (int)obj_param(o, "spr", -1);
+            g->wizard_hp = 4;
+            break;
         case OBJ_JUMPPAD:
             if (g->npads < MAX_PADS) {
                 __typeof__(g->pads[0]) *p = &g->pads[g->npads++];
@@ -770,6 +795,41 @@ void game_start(Game *g, const LevelDef *lv, int mode, const GameSettings *set) 
     g->sand_claimer = -1;
     g->jump_pad = -1;
     g->wind_key = -1;
+    g->jumpy_last_pos = g->last_touch_world = g->pos;
+    g->mirror_active = (lv->flags & LF_MIRROR) != 0;
+    g->santa_cam_y = g->santa_min_y = g->pos.y;
+    if ((set->mods & MOD_EASY) && mode == MODE_NORMAL) {
+        for (int i = 0; i < g->nghosts; i++)
+            if (!g->ghosts[i].final) g->ghosts[i].alive = false;
+    }
+    if ((set->mods & MOD_BUDDY) && mode == MODE_NORMAL) {
+        g->buddy_on = true;
+        g->buddy_pos = v2add(g->pos, v2(cosf(randf(0, 6.283f)) * 32.0f, sinf(randf(0, 6.283f)) * 32.0f));
+        g->buddy_scale = 0.0f;
+        g->buddy_angle = randf(0, 6.28318f);
+    }
+    if ((set->mods & MOD_MISSILES) && mode != MODE_DEMO) {
+        g->missile_on = true;
+        g->missile_pos = g->pos;
+        g->missile_timer = 240;
+    }
+    if ((set->mods & MOD_E_BEES) && mode != MODE_DEMO) {
+        g->nbees = 20;
+        for (int i = 0; i < 20; i++) {
+            g->bees[i].pos = v2(randf(-lv->bounds, lv->bounds), randf(-lv->bounds, lv->bounds));
+            g->bees[i].accel = randf(20.0f, 50.0f);
+            g->bees[i].limit = randf(100.0f, 1000.0f);
+        }
+    }
+    if ((set->mods & MOD_E_BORT) && mode != MODE_DEMO) {
+        g->neborts = 25;
+        for (int i = 0; i < 25; i++) {
+            g->eborts[i].pos = v2(randf(-lv->bounds, lv->bounds), randf(-lv->bounds, lv->bounds));
+            float a = randf(0, 6.28318f);
+            g->eborts[i].vel = v2(cosf(a) * 180.0f, sinf(a) * 180.0f);
+            g->eborts[i].hue = i % 8;
+        }
+    }
     tracks_tick(g); // the animations' first frame is in place before the cat drops in
     g->key_rotation_offset = v2(48, 0);
     g->thought = TH_NONE; // the level start's Idle thought is played by the app
@@ -826,7 +886,7 @@ static void friction(Game *g) {
 static vec2 drag_vector(const Game *g, vec2 mouse) {
     vec2 h = v2mul(v2sub(g->click_pos, mouse), g->set.power_sensitivity);
     if (g->set.invert_shot) h = v2mul(h, -1);
-    return v2limit(h, MAX_DRAG);
+    return (g->set.mods & MOD_GOD) ? h : v2limit(h, MAX_DRAG);
 }
 
 static void set_launch_pitch(Game *g) {
@@ -892,7 +952,7 @@ static void state_enter(Game *g, const GameInput *in) {
             g->strokes++;
             set_launch_pitch(g);
             transition(g, PS_MOVING);
-            g->events |= EV_LAUNCH;
+            g->events |= (g->set.mods & MOD_DIZZY) ? EV_LAUNCH_DIZZY : EV_LAUNCH;
             g->thought = TH_MOVING;
         }
         break;
@@ -901,6 +961,18 @@ static void state_enter(Game *g, const GameInput *in) {
         g->moving_type = 0;
         g->burst_buffer = 0;
         g->moving_first_frame = true;
+        g->jumpy_last_pos = g->pos;
+        break;
+    case PS_PARRY: // PParry.gd
+        g->parry_stored_vel = g->vel;
+        g->vel = v2(0, 0);
+        g->parry_active = 0;
+        g->parry_timer = PARRY_TIME;
+        g->events |= EV_PARRY;
+        break;
+    case PS_TELEKINETIC: // PTelekinetic.gd
+        g->hit_visible = false;
+        g->jumpy_last_pos = g->pos;
         break;
     case PS_WIN:
         g->hit_visible = false;
@@ -943,7 +1015,8 @@ static void state_update(Game *g, const GameInput *in) {
         if (g->sprite_scale >= 0.064f) {
             g->sprite_scale = 0.064f;
             g->active = true;
-            transition(g, g->mode == MODE_DEMO ? PS_ATTRACT : PS_IDLE);
+            transition(g, g->mode == MODE_DEMO ? PS_ATTRACT
+                        : (g->set.mods & MOD_TELEKINESIS) ? PS_TELEKINETIC : PS_IDLE);
             return;
         }
         if (g->set.buffer_shot && in->click_released && !g->spawn_first_frame) {
@@ -971,7 +1044,7 @@ static void state_update(Game *g, const GameInput *in) {
             g->strokes++;
             set_launch_pitch(g);
             transition(g, PS_MOVING);
-            g->events |= EV_LAUNCH;
+            g->events |= (g->set.mods & MOD_DIZZY) ? EV_LAUNCH_DIZZY : EV_LAUNCH;
             g->thought = TH_MOVING;
             return;
         }
@@ -992,8 +1065,86 @@ static void state_update(Game *g, const GameInput *in) {
             g->buffered_shot = drag_vector(g, in->mouse);
             g->buffered_frame = g->frame;
         }
+        if (g->burst_buffer > 0 && (g->set.mods & MOD_BURST)) { // PMoving.gd burst modifier
+            if (in->click_pressed) g->events |= EV_GRAB;
+            if (in->click_down || in->click_released) g->hit = drag_vector(g, in->mouse);
+            if (in->click_down) g->hit_visible = true;
+            if (in->click_released) {
+                g->hit_visible = false;
+                vec2 nv = v2mul(g->hit, DRAG_MULTIPLIER);
+                if (v2len(nv) < LAUNCH_POWER_MIN) {
+                    g->events |= EV_CANCEL;
+                } else {
+                    g->vel = nv;
+                    g->strokes++;
+                    g->coin_multiplier = 0;
+                    g->events |= EV_BURST;
+                    g->thought = TH_MOVING;
+                    return;
+                }
+            }
+        }
         g->moving_first_frame = false;
         g->burst_buffer++;
+        if (g->set.mods & MOD_JUMPY) { // PMoving.gd jumpy modifier
+            g->jumpy_dist += v2len(v2sub(g->pos, g->jumpy_last_pos));
+            g->jumpy_last_pos = g->pos;
+            if (g->jumpy_dist >= JUMPY_DISTANCE) {
+                g->jumpy_dist -= JUMPY_DISTANCE;
+                transition(g, PS_JUMP);
+                g->events |= EV_JUMP;
+                g->thought = TH_JUMP;
+                return;
+            }
+        }
+        if (g->set.mods & MOD_DIZZY) { // PMoving.gd dizzy modifier
+            float ang = DIZZY_INTENSITY * TICK;
+            float cs = cosf(ang), sn = sinf(ang);
+            g->vel = v2(g->vel.x * cs - g->vel.y * sn, g->vel.x * sn + g->vel.y * cs);
+            g->sprite_rot += ang;
+        }
+        break;
+    }
+
+    case PS_PARRY: // PParry.gd
+        g->parry_timer--;
+        if (g->parry_timer <= 0) {
+            g->vel = g->parry_stored_vel;
+            transition(g, (g->set.mods & MOD_TELEKINESIS) ? PS_TELEKINETIC : PS_MOVING);
+            return;
+        }
+        break;
+
+    case PS_TELEKINETIC: { // PTelekinetic.gd
+        vec2 tgt = v2mul(in->tk_delta, 25.0f * g->set.power_sensitivity);
+        g->vel = v2(lerpf(g->vel.x, tgt.x, 0.01f), lerpf(g->vel.y, tgt.y, 0.01f));
+        float spd = v2len(in->tk_delta) * g->set.power_sensitivity;
+        g->tk_strokes += spd / 3400.0f;
+        g->strokes = (int)g->tk_strokes;
+        float np = lerpf(0.75f, 3.0f, fmaxf(spd / 128.0f, 0.0f));
+        if (np > g->tk_pitch) g->tk_pitch = np;
+        else g->tk_pitch = lerpf(g->tk_pitch, 0.75f, TICK * 3.0f);
+        if (in->click_pressed && (g->set.mods & MOD_BURST)) {
+            g->vel = v2mul(g->vel, -1.0f);
+            g->events |= EV_BURST;
+        }
+        if (g->set.mods & MOD_JUMPY) {
+            g->jumpy_dist += v2len(v2sub(g->pos, g->jumpy_last_pos));
+            g->jumpy_last_pos = g->pos;
+            if (g->jumpy_dist >= JUMPY_DISTANCE) {
+                g->jumpy_dist -= JUMPY_DISTANCE;
+                transition(g, PS_JUMP);
+                g->events |= EV_JUMP;
+                g->thought = TH_JUMP;
+                return;
+            }
+        }
+        if (g->set.mods & MOD_DIZZY) {
+            float ang = DIZZY_INTENSITY * TICK;
+            float cs = cosf(ang), sn = sinf(ang);
+            g->vel = v2(g->vel.x * cs - g->vel.y * sn, g->vel.x * sn + g->vel.y * cs);
+            g->sprite_rot += ang;
+        }
         break;
     }
 
@@ -1014,7 +1165,7 @@ static void state_update(Game *g, const GameInput *in) {
         if (g->jump_timer > JUMP_TIME) {
             g->sprite_scale = 0.064f;
             g->moving_type = 1;
-            transition(g, PS_MOVING);
+            transition(g, (g->set.mods & MOD_TELEKINESIS) ? PS_TELEKINETIC : PS_MOVING);
             return;
         }
         g->sprite_scale = lerpf(g->sprite_scale, 0.15f, g->jump_timer > JUMP_TIME / 2 ? -0.13f : 0.13f);
@@ -1044,13 +1195,18 @@ static void player_tick(Game *g, const GameInput *in) {
         if (g->portal_sick_timer <= 0) g->portal_sick = false;
         else g->portal_sick_timer--;
     }
+    if (g->parry_active > 0) g->parry_active--;
+    if ((g->set.mods & MOD_PARRY) && g->parry_active <= 0 && in->parry_pressed)
+        g->parry_active = PARRY_ACTIVE;
+    if ((g->set.mods & MOD_GOD) && g->mode == MODE_NORMAL && in->teleport_pressed)
+        g->pos = in->mouse;
     if (in->click_pressed) {
         g->buffered_frame = 0;
         g->click_pos = in->mouse;
     }
     state_update(g, in);
 
-    if (g->pstate == PS_CUSTOM || g->pstate == PS_WINFAKE) return; // held by something else
+    if (g->pstate == PS_CUSTOM || g->pstate == PS_WINFAKE || g->pstate == PS_PARRY) return; // held by something else
     if (g->pstate != PS_LOSE && g->pstate != PS_WIN) {
         g->wall_death_timer++;
         if (g->wall_death_count >= WALL_DEATH_TIME - 1) {
@@ -1095,10 +1251,14 @@ static void player_tick(Game *g, const GameInput *in) {
         } else {
             g->events |= EV_PUSH;
         }
-        g->vel = v2bounce(g->vel, c.normal);
-        if (hit_moving_wall) g->pos = v2add(g->pos, v2mul(g->vel, TICK));
-        float av2 = v2len2(g->add_vel), vv2 = v2len2(g->vel);
-        if (100 * av2 > vv2 && vv2 > 0) g->vel = v2mul(g->vel, sqrtf(100 * av2 / vv2));
+        if ((g->set.mods & MOD_STICKY) && g->pstate == PS_MOVING) {
+            g->vel = v2(0, 0);
+        } else {
+            g->vel = v2bounce(g->vel, c.normal);
+            if (hit_moving_wall) g->pos = v2add(g->pos, v2mul(g->vel, TICK));
+            float av2 = v2len2(g->add_vel), vv2 = v2len2(g->vel);
+            if (100 * av2 > vv2 && vv2 > 0) g->vel = v2mul(g->vel, sqrtf(100 * av2 / vv2));
+        }
         if (body >= 0 && g->bodies[body].type == OBJ_DOG && g->bodies[body].bounce) dog_push(g->pos, &g->bodies[body]);
     }
 }
@@ -1124,6 +1284,7 @@ static void tracks_tick(Game *g) {
         int i = 0;
         while (i + 1 < tr->n && tr->t[i + 1] <= t) i++;
         if (tr->kind == TRACK_WIND) {
+            if (g->wizard_on && !g->wizard_wind_on) continue;
             if (i != g->wind_key) {
                 g->wind_key = i;
                 if (g->pstate != PS_LOSE) g->add_vel = v2(tr->x[i], tr->y[i]);
@@ -1180,6 +1341,24 @@ static void horse_hit(Game *g) {
     h->health--;
     g->events |= EV_HHURT | EV_HBOOM;
     if (g->mode != MODE_DEMO) g->thought = TH_HORSE;
+    if (g->wizard_on) { // 5-16 wizard_ghost.gd
+        g->wizard_cast_t = 42;
+        g->events |= EV_MAGIC;
+        if (h->health == 3) {
+            g->wizard_wind_on = true;
+            g->wind_key = -1;
+        } else if (h->health == 2) {
+            g->wizard_wind_on = false;
+            g->add_vel = v2(0, 0);
+            g->mirror_active = true;
+        } else if (h->health == 1) {
+            g->mirror_active = false;
+            g->lights_out = g->lights_done = true;
+            g->events |= EV_LIGHTS;
+        } else if (h->health == 0) {
+            g->wizard_hp = 0;
+        }
+    }
     if (h->health == 0) {
         g->active = false;
         for (int i = 0; i < g->nghosts; i++) g->ghosts[i].alive = false;
@@ -1311,12 +1490,119 @@ static void horse_tick(Game *g, const GameInput *in) {
 static void ghosts_tick(Game *g) {
     g->portal_rot += 0.1f;
     if (g->nuke_flash > 0) g->nuke_flash -= TICK * 2;
+    if (g->wizard_cast_t > 0) g->wizard_cast_t--;
+    float hmul = (g->set.mods & MOD_HARD) ? 1.35f : 1.0f;
     for (int i = 0; i < g->nghosts; i++) {
         if (!g->ghosts[i].alive || g->ghosts[i].inactive || g->ghosts[i].frozen) continue;
+        if (g->ghosts[i].parry_stun > 0) {
+            g->ghosts[i].parry_stun--;
+            continue;
+        }
         vec2 dir = v2norm(v2sub(g->pos, g->ghosts[i].pos));
         float sc = g->ghosts[i].scale; // final_ghost.gd: acceleration * scale, speed_limit * scale.x
-        g->ghosts[i].vel = v2limit(v2add(g->ghosts[i].vel, v2mul(dir, GHOST_ACCEL * sc)), GHOST_LIMIT * sc);
+        g->ghosts[i].vel = v2limit(v2add(g->ghosts[i].vel, v2mul(dir, GHOST_ACCEL * sc * hmul)), GHOST_LIMIT * sc * hmul);
         g->ghosts[i].pos = v2add(g->ghosts[i].pos, v2mul(g->ghosts[i].vel, TICK));
+    }
+}
+
+// Modifiers (Buddy, Missiles, Bees, Borts) & 3-18 Coaster oncoming sequence
+static void extras_tick(Game *g, const GameInput *in) {
+    if (in->click_down) g->last_touch_world = in->mouse;
+    if (g->buddy_on && !g->buddy_dead) { // little_buddy.gd
+        if (g->buddy_scale < 1.0f) g->buddy_scale = fminf(1.0f, g->buddy_scale + TICK);
+        g->buddy_angle += 96.0f * TICK;
+        float dist = v2len(v2sub(g->pos, g->buddy_pos));
+        float w = clampf((dist - 32.0f) / (384.0f - 32.0f), 0.0f, 1.0f);
+        vec2 dir = v2norm(v2sub(g->pos, g->buddy_pos));
+        vec2 orb = v2(-dir.y * 96.0f * (1.0f - w), dir.x * 96.0f * (1.0f - w));
+        g->buddy_pos = v2add(g->buddy_pos, v2mul(v2add(v2mul(dir, 1024.0f * w), orb), TICK));
+        for (int i = 0; i < g->nghosts; i++) {
+            if (!g->ghosts[i].alive || g->ghosts[i].frozen) continue;
+            float rr = g->ghosts[i].hit + 14.0f;
+            if (v2len2(v2sub(g->ghosts[i].pos, g->buddy_pos)) < rr * rr) {
+                g->buddy_dead = true;
+                g->events |= EV_BUDDY_DIE;
+                break;
+            }
+        }
+    }
+    if (g->missile_on && g->active) { // missile_attacker.gd
+        if (g->missile_timer > 0) {
+            if (g->missile_timer <= 180)
+                g->missile_pos = v2(lerpf(g->missile_pos.x, g->pos.x, 0.2f), lerpf(g->missile_pos.y, g->pos.y, 0.2f));
+            if (g->missile_timer == 60) g->events |= EV_MISSILE_DING;
+            g->missile_timer--;
+        } else {
+            g->missile_hitbox_t = 5;
+            g->missile_timer = 240;
+            g->events |= EV_MISSILE_BOOM;
+        }
+        if (g->missile_hitbox_t > 0) {
+            g->missile_hitbox_t--;
+            if (v2len2(v2sub(g->missile_pos, g->pos)) < (32.0f + PLAYER_RADIUS) * (32.0f + PLAYER_RADIUS)) {
+                death(g, DEATH_WALL);
+                return;
+            }
+        }
+    }
+    for (int i = 0; i < g->nbees; i++) { // bee.gd
+        vec2 d = v2norm(v2sub(g->last_touch_world, g->bees[i].pos));
+        g->bees[i].vel = v2limit(v2add(g->bees[i].vel, v2mul(d, g->bees[i].accel)), g->bees[i].limit);
+        g->bees[i].pos = v2add(g->bees[i].pos, v2mul(g->bees[i].vel, TICK));
+    }
+    for (int i = 0; i < g->neborts; i++) {
+        g->eborts[i].pos = v2add(g->eborts[i].pos, v2mul(g->eborts[i].vel, TICK));
+        if (g->eborts[i].pos.x < -g->lv.bounds || g->eborts[i].pos.x > g->lv.bounds) g->eborts[i].vel.x *= -1;
+        if (g->eborts[i].pos.y < -g->lv.bounds || g->eborts[i].pos.y > g->lv.bounds) g->eborts[i].vel.y *= -1;
+    }
+    if (g->coaster_on && g->coaster_started && !g->coaster_done && g->active) { // 3-18 coaster
+        g->coaster_timer++;
+        if (g->coaster_timer >= 45) {
+            g->coaster_timer = 0;
+            int slot = g->coaster_step % 4;
+            bool spawn_ghost = !(g->set.mods & MOD_EASY) && ((g->coaster_step % 5) == 3);
+            g->coaster_step++;
+            for (int i = 0; i < 24; i++) {
+                if (!g->coaster_objs[i].active) {
+                    g->coaster_objs[i].active = true;
+                    g->coaster_objs[i].is_ghost = spawn_ghost;
+                    g->coaster_objs[i].slot = slot;
+                    g->coaster_objs[i].pos = v2(g->coaster_spawn_x, g->coaster_slot_y[slot]);
+                    break;
+                }
+            }
+        }
+        for (int i = 0; i < 24; i++) {
+            if (!g->coaster_objs[i].active) continue;
+            g->coaster_objs[i].pos.x += g->coaster_speed * TICK;
+            if (g->coaster_objs[i].pos.x <= g->coaster_kill_x) {
+                g->coaster_objs[i].active = false;
+                continue;
+            }
+            float rr = (g->coaster_objs[i].is_ghost ? GHOST_HITBOX : 16.0f) + PLAYER_RADIUS;
+            if (v2len2(v2sub(g->coaster_objs[i].pos, g->pos)) < rr * rr) {
+                if (g->coaster_objs[i].is_ghost) {
+                    if (g->parry_active > PARRY_WINDOW) {
+                        g->coaster_objs[i].active = false;
+                        transition(g, PS_PARRY);
+                    } else {
+                        death(g, DEATH_NORMAL);
+                        return;
+                    }
+                } else {
+                    g->coaster_objs[i].active = false;
+                    g->coaster_coins++;
+                    g->level_bonus += 250;
+                    g->events |= EV_SCOIN;
+                    if (g->coaster_coins >= g->coaster_target) {
+                        g->coaster_done = true;
+                        g->goal_target = g->pos;
+                        win(g);
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1458,6 +1744,11 @@ static void areas_tick(Game *g) {
             }
         } else if (s->layers == ZONE_POLICE) {
             if (entered && g->police && !g->police_done) police_event(g);
+        } else if (s->layers == ZONE_COASTER) {
+            if (entered && g->coaster_on && !g->coaster_started) {
+                g->coaster_started = true;
+                g->events |= EV_COASTER_START;
+            }
         } else if (s->layers == ZONE_SAND) {
             if (entered && g->sand_claimer == -1) {
                 g->sand_claimer = z;
@@ -1571,11 +1862,18 @@ static void areas_tick(Game *g) {
             b->bulge = 1;
         }
     }
+    if (g->set.mods & MOD_E_PHARAOH) // pharaoh's_pit.tscn: whole-course sand friction
+        g->vel = v2(lerpf(g->vel.x, 0, 0.15f), lerpf(g->vel.y, 0, 0.15f));
     for (int i = 0; i < g->nghosts; i++) {
-        if (!g->ghosts[i].alive || g->ghosts[i].frozen) continue; // a node with processing off leaves physics
+        if (!g->ghosts[i].alive || g->ghosts[i].frozen || g->ghosts[i].parry_stun > 0) continue; // a node with processing off leaves physics
         float d2 = v2len2(v2sub(g->ghosts[i].pos, g->pos));
         float rr = g->ghosts[i].hit + PLAYER_RADIUS;
         if (d2 < rr * rr) {
+            if (g->parry_active > PARRY_WINDOW) {
+                g->ghosts[i].parry_stun = PARRY_TIME;
+                transition(g, PS_PARRY);
+                return;
+            }
             death(g, DEATH_NORMAL);
             return;
         }
@@ -1584,6 +1882,15 @@ static void areas_tick(Game *g) {
         bool graze = d2 < gr * gr;
         if (g->ghosts[i].graze && !graze) g->events |= EV_GRAZE;
         g->ghosts[i].graze = graze;
+    }
+    if (g->golden_tee_dropped && !g->golden_tee_anim) {
+        if (v2len2(g->pos) < (24.0f + PLAYER_RADIUS) * (24.0f + PLAYER_RADIUS)) {
+            g->golden_tee_anim = true;
+            g->golden_tee_timer = 0;
+            g->events |= EV_GOLDEN_TEE;
+            g->thought = TH_WIN;
+            transition(g, PS_CUSTOM);
+        }
     }
     if (g->has_goal) {
         float rx = g->goal_r + PLAYER_RADIUS, ry = g->goal_ry + PLAYER_RADIUS;
@@ -1628,7 +1935,18 @@ void game_tick(Game *g, const GameInput *in) {
             }
         }
     }
-    if (!(g->lv.flags & LF_NEVER_OB) && g->active) {
+    if (g->golden_tee_anim) {
+        g->golden_tee_timer++;
+        if (g->golden_tee_timer >= 180) g->progress = PROG_GOLDEN_TEE;
+    }
+    if ((g->lv.flags & LF_SANTA_SCROLL) && g->active) { // P-15 santa.gd
+        if (g->pos.y < g->santa_min_y) g->santa_min_y = g->pos.y;
+        float tgt = clampf(g->santa_min_y, -2088.0f + 256.0f + 8.0f, 99999.0f);
+        if (g->santa_cam_y > tgt) g->santa_cam_y = lerpf(g->santa_cam_y, tgt, 0.1f);
+        if (g->pos.x < -256.0f || g->pos.y > g->santa_cam_y + 280.0f) {
+            death(g, DEATH_OB);
+        }
+    } else if (!(g->lv.flags & LF_NEVER_OB) && g->active) {
         float m = fmaxf(fabsf(g->pos.x), fabsf(g->pos.y));
         if (m > g->lv.bounds + OB_RADIUS) death(g, (g->lv.flags & LF_ALWAYS_OB) ? DEATH_OB : DEATH_BACKROOMS);
     }
@@ -1644,6 +1962,7 @@ void game_tick(Game *g, const GameInput *in) {
     tracks_tick(g);
     metronome_tick(g, in);
     ghosts_tick(g);
+    extras_tick(g, in);
     rings_tick(g);
     areas_tick(g);
     for (int i = 0; i < g->ncoins; i++)

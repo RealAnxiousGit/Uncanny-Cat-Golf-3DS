@@ -4,7 +4,16 @@ A Nintendo 3DS port of [Uncanny Cat Golf](https://slappyhappy2000.itch.io/uncann
 
 **This repository contains no part of the game.** No art, music, sounds, levels or text. Everything the 3DS build shows or plays is converted at build time from the game's own source download on itch.io, which you get yourself.
 
-Status: work in progress, private. Worlds 0 and 1 are playable.
+Status: **v1.0.0 complete** — full main game playable on New 3DS and Old 3DS (113 levels across Worlds 0–6, Playthroughs & 15 Modifiers, Endless Shuffle, Summer Villa, Bort Bash, and self-contained `.3dsx` + `.cia`).
+
+## Features (v1.0.0)
+
+- **All 113 levels (Worlds 0–6 + W3–W6 special scenes)**: 3-18 roller coaster, 5-16 wizard spells, 5-18 golden tee & ending, P-15 vertical scroll, 2-17 slot machine, portals, nukes, prism gates, horse boss, metronome layers.
+- **Title Screen & Attract Mode**: animated title, splash lines, and idle attract demos.
+- **Playthroughs & Modifiers**: 6 playthrough slots (`pthru_0..5.ini`), Peak Hunter, and all 15 playthrough/endless modifiers (`Easy`, `Hard`, `Burst`, `Telekinesis`, `Little Buddy`, `Parry`, `Jumpy`, `Dizzy`, `Missiles`, `Sticky`, `God Mode`, plus Endless hazards).
+- **Endless Shuffle**: `E_00`–`E_09` + W0–W4 pool, 61s timer, skips, modifier scaling, Demon meter, and Top 10 leaderboard.
+- **Summer Villa & Minigames**: Costume House (25 costumes + paired ghost skins & jumpscare SFX), Sound Test (with pause & 0.75x mix toggle), Mystery Phone (20+ secret codes), Interactive Credits, and Bort Bash.
+- **Old 3DS & New 3DS**: real-time fixed-timestep accumulator on Old 3DS, linear-heap guard for streaming audio, and multi-threaded audio/asset loading.
 
 ## How it works
 
@@ -21,6 +30,7 @@ SOURCE=/path/to/uncanny-cat-golf-source ./build.sh convert
 ./build.sh 3ds          # UncannyCatGolf.3dsx
 ./build.sh 3ds cia      # UncannyCatGolf.cia (uses Banner1 by default, BANNER=2 or 3 to change)
 ./build.sh sim          # physics check against the attract demos
+./build.sh modtest      # unit tests for all 15 modifiers, Endless Shuffle, Bort Bash & W3-W6 scenes
 ./build.sh gimtest 1    # tries shots at every World 1 gimmick
 ```
 

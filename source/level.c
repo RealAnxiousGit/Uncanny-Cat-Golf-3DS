@@ -10,7 +10,8 @@ static const char *OBJ_NAMES[OBJ_COUNT] = {"player", "goal", "ghost", "coin", "d
                                                "slot", "slotmachine", "switch", "dog", "doggoal", "ring",
                                                "scoin", "tiles", "lights", "ashbaby",
                                                "portal", "nuke", "fakegoal", "fghost", "prismgate",
-                                               "horse", "hgoal", "mine", "bossappear", "metronome"};
+                                               "horse", "hgoal", "mine", "bossappear", "metronome",
+                                               "coaster", "wizard"};
 
 void shape_update_bbox(Shape *s) {
     if (s->kind == SHAPE_CIRCLE) {
@@ -62,6 +63,9 @@ bool level_load(LevelDef *lv, const char *path) {
             if (strstr(rest, "hideScoring")) lv->flags |= LF_HIDE_SCORING;
             if (strstr(rest, "unskippable")) lv->flags |= LF_UNSKIPPABLE;
             if (strstr(rest, "final_ghost_level")) lv->flags |= LF_FINAL_GHOST;
+            if (strstr(rest, "golden_tee")) lv->flags |= LF_GOLDEN_TEE;
+            if (strstr(rest, "santa_scroll")) lv->flags |= LF_SANTA_SCROLL;
+            if (strstr(rest, "metronome_level")) lv->flags |= LF_METRONOME;
         } else if (!strcmp(key, "image")) {
             char which[8] = {0};
             sscanf(rest, "%d %7s", &lv->image_size, which);
@@ -153,7 +157,8 @@ bool level_load(LevelDef *lv, const char *path) {
             z.kind = SHAPE_POLY;
             z.layers = !strcmp(kind, "sand") ? ZONE_SAND : !strcmp(kind, "water") ? ZONE_WATER
                      : !strcmp(kind, "police") ? ZONE_POLICE : !strcmp(kind, "lights") ? ZONE_LIGHTS
-                     : !strcmp(kind, "ashbaby") ? ZONE_ASHBABY : !strcmp(kind, "bossappear") ? ZONE_BOSSAPPEAR : 0;
+                     : !strcmp(kind, "ashbaby") ? ZONE_ASHBABY : !strcmp(kind, "bossappear") ? ZONE_BOSSAPPEAR
+                     : !strcmp(kind, "coaster") ? ZONE_COASTER : 0;
             z.n = (int)strtol(p, &p, 10);
             if (!z.layers || z.n < 3) continue;
             z.pts = malloc(z.n * sizeof(vec2));

@@ -136,6 +136,37 @@ def convert_levels(project, tc, out, worlds, report):
             log("  level %-6s %-5s bounds %4d  shapes %4d  objects %2d  %.1fs" % (
                 info["id"], name, info["bounds"], info["shapes"], info["objects"], time.time() - t))
         index.append("world %s %d %s" % (w, len(names), " ".join(names)))
+    # Endless levels (E_00..E_09) -> levels/we, world 7 in index.txt
+    edir = "res://assetsNEW/scenes/game/levels/endless"
+    efs = project.fs(edir)
+    if os.path.isdir(efs):
+        efiles = sorted(f for f in os.listdir(efs) if f.endswith(".tscn"))
+        eout = os.path.join(lv_root, "we")
+        enames = []
+        for f in efiles:
+            name = f[:-5]
+            t = time.time()
+            info = L.convert_level(project, tc, "%s/%s" % (edir, f), eout, name, report)
+            for suffix, fmt in (("_u", "rgb565"), ("_o", "rgba8"), ("_u2", "rgb565"), ("_o2", "rgba8")):
+                png = os.path.join(eout, name + suffix + ".png")
+                if os.path.exists(png):
+                    tex3ds([png], os.path.join(eout, name + suffix + ".t3x"), fmt, z="lz11")
+                    if not KEEP_PNG:
+                        os.remove(png)
+            for gid, fp in info.get("tiles", []):
+                pot_pad(fp)
+                tex3ds([fp], os.path.join(eout, "%s_t%d.t3x" % (name, gid)), "rgba8", z="lz11")
+                if not KEEP_PNG:
+                    os.remove(fp)
+            if info["dyn"]:
+                tex3ds(info["dyn"], os.path.join(eout, name + "_d.t3x"), "rgba8", atlas=True, z="lz11")
+                if not KEEP_PNG:
+                    for fp in info["dyn"]:
+                        os.remove(fp)
+            enames.append(name)
+            log("  endless %-5s %-5s bounds %4d  shapes %4d  %.1fs" % (
+                info["id"], name, info["bounds"], info["shapes"], time.time() - t))
+        index.append("world 7 %d %s" % (len(enames), " ".join(enames)))
     with open(os.path.join(lv_root, "index.txt"), "w", newline="\n") as f:
         f.write("\n".join(index) + "\n")
 
@@ -417,6 +448,143 @@ def convert_port(out):
     log("  port: intro credits, Oops screen")
 
 
+def _save_atlas(entries, tmp, t3x_path, txt_path, keep_png=False):
+    os.makedirs(tmp, exist_ok=True)
+    os.makedirs(os.path.dirname(t3x_path), exist_ok=True)
+    files, lines = [], []
+    for i, (name, img, anc, upp) in enumerate(entries):
+        p = os.path.join(tmp, "%02d_%s.png" % (i, name))
+        img.save(p)
+        files.append(p)
+        lines.append("%s %d %d %d %s %s %s %s" % (name, i, img.size[0], img.size[1],
+                                                L._fmt(anc[0]), L._fmt(anc[1]),
+                                                L._fmt(upp[0]), L._fmt(upp[1])))
+    tex3ds(files, t3x_path, "rgba8", atlas=True, z="lz11")
+    with open(txt_path, "w", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    if not keep_png:
+        shutil.rmtree(tmp)
+
+
+# Costumes from save_data.gd in display order: (id, unlock_key_or_none)
+PLAYABLE_COSTUMES = [
+    ("canny", ""), ("uncanny", ""), ("_blank", ""),
+    ("ms_canny", "costume_ms_canny"), ("retro", "costume_retro"), ("dog", "costume_dog"),
+    ("veteran", "costume_veteran"), ("cannydigo", "costume_cannydigo"), ("rainbow", "costume_rainbow"),
+    ("king", "costume_king"), ("catfish", "costume_catfish"), ("builder", "costume_builder"),
+    ("nothing", "costume_nothing"), ("copycat", "costume_copycat"), ("wires", "costume_wires"),
+    ("bingus", "costume_bingus"), ("minnie", "costume_minnie"), ("robert", "costume_robert"),
+    ("rudy", "costume_rudy"), ("ploobie", "costume_ploobie"), ("pig", "costume_pig"),
+    ("chen", "costume_chen"), ("swag", "costume_swag"), ("arleling", "costume_arleling"),
+    ("true", "costume_true"),
+]
+
+
+def convert_costumes(project, tc, out):
+    """romfs/gfx/costumes.t3x + costumes.txt: all 25 costumes + paired ghost skins (max 96x96)."""
+    gfx = os.path.join(out, "romfs", "gfx")
+    tmp = os.path.join(out, "tmp_costumes")
+    cost_dir = "res://assetsNEW/scenes/utils/costumes"
+    entries = []
+    seen_spr = {}
+    meta_lines = []
+
+    def add_tex(res_path, tag):
+        if res_path in seen_spr:
+            return seen_spr[res_path]
+        img, anc, upp = texture_sprite(project, tc, res_path, 0.064, max_px=96)
+        idx = len(entries)
+        entries.append((tag, img, anc, upp))
+        seen_spr[res_path] = tag
+        return tag
+
+    for cid, ukey in PLAYABLE_COSTUMES:
+        r = project.load("%s/%s.tres" % (cost_dir, cid))
+        pr = r.resource.props
+        cname = str(pr.get("name", cid))
+        g_ext = S.resolve(project, r, pr.get("graphic"))
+        g_path = g_ext.path if isinstance(g_ext, S.Ext) else "res://assetsNEW/graphics/player/costume_canny.png"
+        spr_tag = add_tex(g_path, "c_" + cid)
+        ghost_id = str(pr.get("ghost_costume", "uncanny") or "uncanny")
+        gr = project.load("%s/%s.tres" % (cost_dir, ghost_id))
+        gg_ext = S.resolve(project, gr, gr.resource.props.get("graphic"))
+        gg_path = gg_ext.path if isinstance(gg_ext, S.Ext) else "res://assetsNEW/graphics/player/costume_uncanny.png"
+        gspr_tag = add_tex(gg_path, "g_" + ghost_id)
+        snd_ext = S.resolve(project, r, pr.get("sound"))
+        snd_rel = "ghost/cannyJumpscare.ogg"
+        if isinstance(snd_ext, S.Ext) and "/sounds/" in snd_ext.path:
+            snd_rel = snd_ext.path.split("/sounds/", 1)[1]
+        meta_lines.append("%s\t%s\t%s\t%s\t%s\t%s" % (cid, cname, spr_tag, gspr_tag, snd_rel, ukey or "-"))
+
+    _save_atlas(entries, tmp, os.path.join(gfx, "costumes.t3x"), os.path.join(gfx, "costumes_atlas.txt"), KEEP_PNG)
+    with open(os.path.join(gfx, "costumes.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(meta_lines) + "\n")
+    log("  costumes: %d costumes, %d sprites" % (len(meta_lines), len(entries)))
+
+
+def convert_extras(project, tc, out):
+    """romfs/gfx/title.t3x and romfs/gfx/extras.t3x for title, modifiers, endless, villa & special levels."""
+    gfx = os.path.join(out, "romfs", "gfx")
+    g = "res://assetsNEW/graphics/"
+
+    def load_scaled(res, max_w, max_h=None, center=True):
+        im = Image.open(project.fs(res)).convert("RGBA")
+        if max_h is None:
+            max_h = max_w
+        if im.size[0] > max_w or im.size[1] > max_h:
+            im.thumbnail((max_w, max_h), Image.LANCZOS)
+        anc = (im.size[0] / 2.0, im.size[1] / 2.0) if center else (0.0, 0.0)
+        return im, anc, (1.0, 1.0)
+
+    # Title screen atlas
+    t_entries = []
+    for nm, res, mw, mh, ctr in (
+        ("title_grid", g + "menu/title_bg_grid.png", 400, 240, False),
+        ("title_hills", g + "menu/title_bg_hills2.png", 400, 160, False),
+        ("logo_big", g + "HUD/logo/logo_en.png", 280, 140, True),
+        ("logo_small", g + "HUD/logo_small/logo_small_en.png", 260, 48, True),
+    ):
+        im, anc, upp = load_scaled(res, mw, mh, ctr)
+        t_entries.append((nm, im, anc, upp))
+    _save_atlas(t_entries, os.path.join(out, "tmp_title"), os.path.join(gfx, "title.t3x"),
+                os.path.join(gfx, "title.txt"), KEEP_PNG)
+
+    # Extras / modifiers / endless / special-level atlas
+    e_entries = []
+    bee_sheet = Image.open(project.fs(g + "modifier/bee.png")).convert("RGBA")
+    bw = bee_sheet.size[0] // 2
+    for i in range(2):
+        fr = bee_sheet.crop((i * bw, 0, (i + 1) * bw, bee_sheet.size[1]))
+        fr.thumbnail((24, 24), Image.LANCZOS)
+        e_entries.append(("bee_%d" % i, fr, (fr.size[0] / 2.0, fr.size[1] / 2.0), (1.0, 1.0)))
+
+    for nm, res, mw in (
+        ("gravestone", g + "gimmicks/uncanny/gravestone.png", 36),
+        ("reticle", g + "modifier/missile_reticle.png", 48),
+        ("explosion", g + "gimmicks/mine_explosion.png", 96),
+        ("red_demon", g + "player/redDemon.png", 64),
+        ("rad_demon", g + "player/radDemon.png", 64),
+        ("sparkle", g + "HUD/peak_sparkle.png", 20),
+        ("cd", g + "misc/sound_test_cd.png", 112),
+        ("cd_hand", g + "misc/sound_test_hand.png", 48),
+        ("play_btn", g + "HUD/play_sprite.png", 40),
+        ("pause_btn", g + "HUD/pause_sprite.png", 40),
+        ("slot_eye", g + "gimmicks/eyes.png", 64),
+        ("golden_tee", g + "stage/deco/W5/golden_tee.png", 48),
+        ("coaster_warn_coin", g + "gimmicks/coaster_money_warning.png", 36),
+        ("coaster_warn_ghost", g + "gimmicks/coaster_ghost_warning.png", 36),
+        ("coaster_car", g + "gimmicks/roller_coaster.png", 128),
+        ("demon_back", g + "HUD/demon_meter_back.png", 160),
+        ("demon_fill", g + "HUD/demon_meter_fill.png", 160),
+        ("icon_sound", g + "menu/extras_menu/icon_sound_test.png", 48),
+    ):
+        im, anc, upp = load_scaled(res, mw, mw, True)
+        e_entries.append((nm, im, anc, upp))
+    _save_atlas(e_entries, os.path.join(out, "tmp_extras"), os.path.join(gfx, "extras.t3x"),
+                os.path.join(gfx, "extras.txt"), KEEP_PNG)
+    log("  extras: title (%d), extras (%d)" % (len(t_entries), len(e_entries)))
+
+
 # --- audio ------------------------------------------------------------------
 
 def import_loop(project, res_path):
@@ -452,6 +620,51 @@ def convert_audio(project, out):
         shutil.copyfile(project.fs(path), os.path.join(mdir, fn))
         loop, off, bpm = import_loop(project, path)
         idx.append("%d %s %d %s %s" % (i, fn, int(loop), L._fmt(off), L._fmt(bpm)))
+
+    # Extra OGGs for World Clear, Ending, Credits, Costume House, Phone & Sound Test
+    extra_dirs = (
+        ("res://assetsNEW/music", ""),
+        ("res://assetsNEW/music/phone", "phone/"),
+        ("res://assetsNEW/music/soundTestExclusive", "soundTestExclusive/"),
+        ("res://assetsNEW/music/costume", "costume/"),
+    )
+    copied = {fn for fn in os.listdir(mdir) if fn.endswith(".ogg")}
+    for res_dir, sub in extra_dirs:
+        fsd = project.fs(res_dir)
+        if not os.path.isdir(fsd):
+            continue
+        for fn in sorted(os.listdir(fsd)):
+            if not fn.lower().endswith(".ogg"):
+                continue
+            rel = sub + fn
+            if not sub and fn in copied:
+                continue
+            dst = os.path.join(mdir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(os.path.join(fsd, fn), dst)
+
+    # Parse sound_test.tscn for Sound Test song list
+    st_res = S.instantiate(project, "res://assetsNEW/scenes/game/menus/extras/sound_test.tscn")
+    st_lines = []
+    for item in (st_res.get("songs") or []):
+        sub = item if hasattr(item, "props") else S.resolve(project, st_res, item)
+        if sub is None:
+            continue
+        sp = sub.get("song")
+        spath = getattr(sp, "path", "") if sp is not None else ""
+        if "/music/" not in spath:
+            continue
+        rel = spath.split("/music/", 1)[1]
+        sname = str(sub.get("name", rel)).replace("\t", " ")
+        dkey = str(sub.get("desc_key", ""))
+        ru = str(sub.get("required_unlock", "") or "")
+        col = S.color(sub.get("cd_color"))
+        loop, off, bpm = import_loop(project, spath)
+        st_lines.append("%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s" % (
+            rel, sname, dkey, ru or "-", int(loop), L._fmt(off), L._fmt(col[0]), L._fmt(col[1]), L._fmt(col[2])))
+    with open(os.path.join(mdir, "soundtest.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(st_lines) + "\n")
+
     with open(os.path.join(mdir, "index.txt"), "w", newline="\n") as f:
         f.write("\n".join(idx) + "\n")
     # sound effects: copied as they are (Ogg Vorbis), decoded on the console
@@ -527,7 +740,7 @@ def main():
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--no-thoughts", action="store_true", help="skip the thoughts clips (slowest step)")
     ap.add_argument("--keep-png", action="store_true", help="keep baked PNGs next to the .t3x files")
-    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,hud,menu,port,thoughts,text,demos,audio,minigames")
+    ap.add_argument("--only", default="", help="comma list of steps: levels,sprites,costumes,extras,hud,menu,port,thoughts,text,demos,audio,minigames")
     a = ap.parse_args()
     KEEP_PNG = a.keep_png
     only = {s.strip() for s in a.only.split(",") if s.strip()}
@@ -548,6 +761,12 @@ def main():
     if want("sprites"):
         log("sprites:")
         convert_sprites(project, tc, a.out, report)
+    if want("costumes"):
+        log("costumes:")
+        convert_costumes(project, tc, a.out)
+    if want("extras"):
+        log("extras:")
+        convert_extras(project, tc, a.out)
     if want("minigames"):
         log("minigames:")
         convert_minigames(project, a.out)
