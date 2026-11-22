@@ -34,17 +34,6 @@ SOURCE=/path/to/uncanny-cat-golf-source ./build.sh convert
 
 `./build.sh 3ds PROFILE=1` builds a copy that writes `sdmc:/ucg_prof.txt`: every frame whose work takes over 12 ms, split into parts, to find stutters. Music, sound decoding, the thoughts clips and save writes run on a second thread (`source/worker.c`); level loads happen while the screen is faded to black.
 
-## Where the game's files live
-
-The game reads its converted files from `sdmc:/3ds/Uncanny Cat Golf/` when that folder is there, and otherwise from inside the 3dsx (test builds carry them). With neither, it shows an "Oops" screen saying where to put them.
-
-```
-LEAN=1 ./build.sh 3ds   # the release kind: about 750 KB, only the port's own art inside (romfs/port/)
-./build.sh sdcard       # the game's files as the "Uncanny Cat Golf" folder for the SD card's 3ds/ folder
-```
-
-The port's own art (the intro credits, NickBin's logo, the Oops screen's cat and sad trombone) is made by `tools/convert/credits.py` from `port-art/` and never uses the game's files; `port-art/README.md` lists where each picture comes from.
-
 ## When the game gets an update
 
 See [UPDATING.md](UPDATING.md): `python tools/game_update.py diff <new source>` lists what changed and which port code each changed script maps to.
