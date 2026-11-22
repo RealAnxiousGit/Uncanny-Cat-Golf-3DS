@@ -2,8 +2,6 @@
 
 A Nintendo 3DS port of [Uncanny Cat Golf](https://slappyhappy2000.itch.io/uncanny-cat-golf) by SH2K (SlappyHappy2000), Haze Weathers, mbx8rt, Penny Rigate, greenhead352, bibizu and the rest of the Canny Crew.
 
-**This repository contains no part of the game.** No art, music, sounds, levels or text. Everything the 3DS build shows or plays is converted at build time from the game's own source download on itch.io, which you get yourself.
-
 Status: **v1.0.0 complete** — full main game playable on New 3DS and Old 3DS (113 levels across Worlds 0–6, Playthroughs & 15 Modifiers, Endless Shuffle, Summer Villa, Bort Bash, and self-contained `.3dsx` + `.cia`).
 
 ## Features (v1.0.0)
